@@ -87,9 +87,12 @@ async function fetchFundingSpreads(): Promise<FundingSnapshot[]> {
     for (const fr of fundingList as Array<Record<string, unknown>>) {
       const sym = String(fr.symbol ?? "") || idToSym.get(Number(fr.market_id)) || "";
       if (sym) {
-        ltRates.set(sym, Number(fr.rate ?? fr.funding_rate ?? 0));
-        const mp = Number(fr.mark_price ?? 0) || idToPrice.get(Number(fr.market_id)) || 0;
-        if (mp > 0) ltPrices.set(sym, mp);
+        // Deduplicate: keep only the first (latest) entry per symbol, matching funding-rates.ts
+        if (!ltRates.has(sym)) {
+          ltRates.set(sym, Number(fr.rate ?? fr.funding_rate ?? 0));
+          const mp = Number(fr.mark_price ?? 0) || idToPrice.get(Number(fr.market_id)) || 0;
+          if (mp > 0) ltPrices.set(sym, mp);
+        }
       }
     }
   }
