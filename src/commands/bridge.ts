@@ -53,7 +53,7 @@ export function registerBridgeCommands(
   bridge
     .command("quote")
     .description("Get bridge quotes from all providers")
-    .requiredOption("--from <chain>", "Source chain (solana, arbitrum, ethereum, base)")
+    .requiredOption("--from <chain>", "Source chain (solana, arbitrum, base)")
     .requiredOption("--to <chain>", "Destination chain")
     .requiredOption("--amount <amount>", "USDC amount")
     .option("--sender <address>", "Source address")
@@ -158,7 +158,7 @@ export function registerBridgeCommands(
         senderAddress = opts.sender ?? keypair.publicKey.toBase58();
         signerKey = pk;
       } else {
-        const exchange = srcChain === "arbitrum" ? "hyperliquid" : "lighter";
+        const exchange = "hyperliquid" as const;
         const pk = await loadPrivateKey(exchange);
         const { ethers } = await import("ethers");
         const wallet = new ethers.Wallet(pk);
@@ -176,7 +176,7 @@ export function registerBridgeCommands(
         recipientAddress = keypair.publicKey.toBase58();
         dstSignerKey = pk;
       } else {
-        const exchange = dstChain === "arbitrum" ? "hyperliquid" : "lighter";
+        const exchange = "hyperliquid" as const;
         const pk = await loadPrivateKey(exchange);
         const { ethers } = await import("ethers");
         recipientAddress = new ethers.Wallet(pk).address;

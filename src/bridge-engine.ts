@@ -6,7 +6,7 @@
  *   EVM→EVM:  attestation poll + manual receiveMessage on dest chain
  *   EVM→Sol:  attestation poll + Solana receiveMessage (ALT + 400k CU)
  *
- * Handles USDC bridging between Solana ↔ Arbitrum ↔ Base ↔ Ethereum
+ * Handles USDC bridging between Solana ↔ Arbitrum ↔ Base ↔ HyperCore
  * for cross-exchange rebalancing in funding arb.
  */
 
@@ -14,56 +14,28 @@
 
 export const CHAIN_IDS = {
   solana: 7565164,
-  ethereum: 1,
   arbitrum: 42161,
   base: 8453,
-  optimism: 10,
-  avalanche: 43114,
-  polygon: 137,
-  unichain: 130,
-  linea: 59144,
-  sonic: 146,
-  worldchain: 480,
-  bnb: 56,
-  ink: 57073,
 } as const;
 
 export const USDC_ADDRESSES: Record<string, string> = {
   solana: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
-  ethereum: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
   arbitrum: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
   base: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-  optimism: "0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85",
-  avalanche: "0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E",
-  polygon: "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359",
-  unichain: "0x078D782b760474a361dDA0AF3839290b0EF57AD6",
-  linea: "0x176211869cA2b568f2A7D4EE941E073a821EE1ff",
-  sonic: "0x29219dd400f2Bf60E5a23d13Be72B486D4038894",
-  bnb: "0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d",
 };
 
 // Exchange → chain mapping
 export const EXCHANGE_TO_CHAIN: Record<string, string> = {
   pacifica: "solana",
   hyperliquid: "hyperevm", // HyperCore CCTP: direct deposit to perps via CctpForwarder (domain 19)
-  lighter: "ethereum",
+  lighter: "arbitrum",
 };
 
 // Chain → RPC URLs
 const RPC_URLS: Record<string, string> = {
   solana: "https://api.mainnet-beta.solana.com",
-  ethereum: "https://eth.llamarpc.com",
   arbitrum: "https://arb1.arbitrum.io/rpc",
   base: "https://mainnet.base.org",
-  optimism: "https://mainnet.optimism.io",
-  avalanche: "https://api.avax.network/ext/bc/C/rpc",
-  polygon: "https://1rpc.io/matic",
-  unichain: "https://mainnet.unichain.org",
-  linea: "https://rpc.linea.build",
-  sonic: "https://rpc.soniclabs.com",
-  worldchain: "https://worldchain-mainnet.g.alchemy.com/public",
-  bnb: "https://bsc-dataseed.binance.org",
-  ink: "https://rpc-gel.inkonchain.com",
   hyperevm: "https://rpc.hyperliquid.xyz/evm",
 };
 
@@ -435,7 +407,7 @@ async function submitSolanaTransaction(tx: Record<string, unknown>, signerKey: s
 async function submitEvmTransaction(tx: Record<string, unknown>, privateKey: string, chain: string): Promise<string> {
   const { ethers } = await import("ethers");
 
-  const rpc = RPC_URLS[chain] ?? RPC_URLS.ethereum;
+  const rpc = RPC_URLS[chain] ?? RPC_URLS.arbitrum;
   const provider = new ethers.JsonRpcProvider(rpc);
   const wallet = new ethers.Wallet(privateKey, provider);
 
@@ -472,20 +444,10 @@ async function submitEvmTransaction(tx: Record<string, unknown>, privateKey: str
 // ── Circle CCTP V2 (EVM + Solana) ──
 
 export const CCTP_DOMAINS: Record<string, number> = {
-  ethereum: 0,
-  avalanche: 1,
-  optimism: 2,
   arbitrum: 3,
   solana: 5,
   base: 6,
-  polygon: 7,
-  unichain: 10,
-  linea: 11,
-  sonic: 13,
-  worldchain: 14,
-  bnb: 17,
   hyperevm: 19,
-  ink: 21,
 };
 
 // EVM V2 contracts — ALL EVM chains use the same V2 proxy addresses (per Circle docs)
@@ -554,7 +516,7 @@ export async function getCctpQuote(
     const srcDomain = CCTP_DOMAINS[srcChain];
     if (srcDomain === undefined) throw new Error(`No CCTP domain for ${srcChain}`);
     const fees = await getHyperCoreCctpFees(srcDomain, amountUsdc);
-    const estimatedTime = srcChain === "solana" ? 65 : srcChain === "ethereum" ? 900 : 60;
+    const estimatedTime = srcChain === "solana" ? 65 : 60;
     return {
       provider: "cctp",
       srcChain,
@@ -570,14 +532,7 @@ export async function getCctpQuote(
   }
 
   // Standard CCTP V2 with auto-relay
-  let estimatedTime: number;
-  if (srcChain === "solana" || dstChain === "solana") {
-    estimatedTime = 65;
-  } else if (srcChain === "ethereum" || dstChain === "ethereum") {
-    estimatedTime = 900;
-  } else {
-    estimatedTime = 60;
-  }
+  const estimatedTime = (srcChain === "solana" || dstChain === "solana") ? 65 : 60;
 
   // Fetch relay fee from Circle API
   const srcDomain = CCTP_DOMAINS[srcChain];
@@ -803,12 +758,10 @@ const CCTP_EXTENSION: Record<string, string> = {
 // USDC EIP-712 domain names per chain (for ReceiveWithAuthorization)
 const USDC_EIP712_NAME: Record<string, string> = {
   arbitrum: "USD Coin",
-  ethereum: "USD Coin",
   base: "USD Coin",
 };
 const USDC_EIP712_VERSION: Record<string, string> = {
   arbitrum: "2",
-  ethereum: "2",
   base: "2",
 };
 
@@ -924,7 +877,7 @@ async function executeCctpEvmToHyperCore(
   const { ethers } = await import("ethers");
   const { randomBytes } = await import("crypto");
 
-  const srcRpc = RPC_URLS[srcChain] ?? RPC_URLS.ethereum;
+  const srcRpc = RPC_URLS[srcChain] ?? RPC_URLS.arbitrum;
   const srcProvider = new ethers.JsonRpcProvider(srcRpc);
   const srcWallet = new ethers.Wallet(signerKey, srcProvider);
 
@@ -1019,7 +972,7 @@ async function executeCctpEvmToEvm(
 ): Promise<BridgeResult> {
   const { ethers } = await import("ethers");
 
-  const srcRpc = RPC_URLS[srcChain] ?? RPC_URLS.ethereum;
+  const srcRpc = RPC_URLS[srcChain] ?? RPC_URLS.arbitrum;
   const srcProvider = new ethers.JsonRpcProvider(srcRpc);
   const srcWallet = new ethers.Wallet(signerKey, srcProvider);
 
@@ -1337,7 +1290,7 @@ async function executeCctpEvmToSolana(
 ): Promise<BridgeResult> {
   const { ethers } = await import("ethers");
 
-  const srcRpc = RPC_URLS[srcChain] ?? RPC_URLS.ethereum;
+  const srcRpc = RPC_URLS[srcChain] ?? RPC_URLS.arbitrum;
   const srcProvider = new ethers.JsonRpcProvider(srcRpc);
   const srcWallet = new ethers.Wallet(signerKey, srcProvider);
 
@@ -1662,15 +1615,8 @@ const RELAY_API = "https://api.relay.link";
 // Relay chain IDs (same as standard EVM chain IDs, Solana = 792703809)
 const RELAY_CHAIN_IDS: Record<string, number> = {
   solana: 792703809,
-  ethereum: 1,
   arbitrum: 42161,
   base: 8453,
-  optimism: 10,
-  avalanche: 43114,
-  polygon: 137,
-  linea: 59144,
-  bnb: 56,
-  hyperevm: 999,  // Relay uses custom ID for Hyperliquid
 };
 
 export async function getRelayQuote(

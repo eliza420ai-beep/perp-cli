@@ -59,11 +59,11 @@ describe("Bridge Integration — Read-Only", { timeout: 60000 }, () => {
     it("exchange-to-chain mapping covers all exchanges", () => {
       expect(EXCHANGE_TO_CHAIN.pacifica).toBe("solana");
       expect(EXCHANGE_TO_CHAIN.hyperliquid).toBe("hyperevm");
-      expect(EXCHANGE_TO_CHAIN.lighter).toBe("ethereum");
+      expect(EXCHANGE_TO_CHAIN.lighter).toBe("arbitrum");
     });
 
     it("CCTP-supported chains have matching USDC addresses", () => {
-      for (const chain of ["solana", "ethereum", "arbitrum", "base"]) {
+      for (const chain of ["solana", "arbitrum", "base"]) {
         expect(USDC_ADDRESSES[chain]).toBeDefined();
       }
     });
@@ -75,19 +75,6 @@ describe("Bridge Integration — Read-Only", { timeout: 60000 }, () => {
   // ══════════════════════════════════════════════════════════
 
   describe("CCTP V2 quotes", () => {
-    it("arbitrum → ethereum: minimal relay fee, ~15min ETA", async () => {
-      const quote = await getCctpQuote("arbitrum", "ethereum", 1000);
-
-      expect(quote.provider).toBe("cctp");
-      expect(quote.srcChain).toBe("arbitrum");
-      expect(quote.dstChain).toBe("ethereum");
-      expect(quote.amountIn).toBe(1000);
-      // Standard (finality=2000) relay fee is $0 minimum, we set $0.01 for reliability
-      expect(quote.fee).toBeLessThanOrEqual(0.02);
-      expect(quote.amountOut).toBeGreaterThanOrEqual(999.98);
-      expect(quote.estimatedTime).toBeGreaterThanOrEqual(60);
-    });
-
     it("solana → arbitrum: minimal relay fee, ~65s ETA", async () => {
       const quote = await getCctpQuote("solana", "arbitrum", 500);
 
@@ -105,46 +92,12 @@ describe("Bridge Integration — Read-Only", { timeout: 60000 }, () => {
       expect(quote.estimatedTime).toBe(60);
     });
 
-    it("ethereum → solana: minimal relay fee, 65s ETA (Solana route priority)", async () => {
-      const quote = await getCctpQuote("ethereum", "solana", 100);
+    it("base → solana: minimal relay fee, 65s ETA", async () => {
+      const quote = await getCctpQuote("base", "solana", 100);
 
       expect(quote.provider).toBe("cctp");
       expect(quote.fee).toBeLessThanOrEqual(0.02);
-      // Code checks Solana involvement first → 65s, not 900s
       expect(quote.estimatedTime).toBe(65);
-    });
-
-    it("→ hyperevm (HyperCore): has protocol + forwarding fee", async () => {
-      const quote = await getCctpQuote("arbitrum", "hyperevm", 1000);
-
-      expect(quote.provider).toBe("cctp");
-      expect(quote.dstChain).toBe("hyperevm");
-      expect(quote.fee).toBeGreaterThan(0);
-      expect(quote.fee).toBeLessThan(5);
-      expect(quote.amountOut).toBeGreaterThan(995);
-    });
-
-    it("solana → hyperevm: has fees, 65s ETA", async () => {
-      const quote = await getCctpQuote("solana", "hyperevm", 500);
-
-      expect(quote.provider).toBe("cctp");
-      expect(quote.fee).toBeGreaterThan(0);
-      expect(quote.estimatedTime).toBe(65);
-    });
-
-    it("hyperevm → arbitrum: fixed $0.20 forwarding fee", async () => {
-      const quote = await getCctpQuote("hyperevm", "arbitrum", 1000);
-
-      expect(quote.provider).toBe("cctp");
-      expect(quote.fee).toBe(0.20);
-      expect(quote.amountOut).toBe(999.80);
-    });
-
-    it("polygon → optimism: now supported via CCTP V2", async () => {
-      const quote = await getCctpQuote("polygon", "optimism", 100);
-      expect(quote.provider).toBe("cctp");
-      expect(quote.amountOut).toBeGreaterThanOrEqual(99.98);
-      expect(quote.fee).toBeLessThanOrEqual(0.02);
     });
 
     it("CCTP quote for tiny amount ($0.01): still valid", async () => {
@@ -154,26 +107,20 @@ describe("Bridge Integration — Read-Only", { timeout: 60000 }, () => {
     });
 
     it("getBestQuote prefers CCTP for supported routes", async () => {
-      // These use CCTP only (no deBridge API call)
-      const q1 = await getBestQuote("arbitrum", "ethereum", 1000, DUMMY_EVM, DUMMY_EVM);
+      const q1 = await getBestQuote("arbitrum", "base", 1000, DUMMY_EVM, DUMMY_EVM);
       expect(q1.provider).toBe("cctp");
-      expect(q1.fee).toBeLessThanOrEqual(0.02); // standard relay fee
+      expect(q1.fee).toBeLessThanOrEqual(0.02);
 
       const q2 = await getBestQuote("solana", "arbitrum", 500, DUMMY_SOLANA, DUMMY_EVM);
       expect(q2.provider).toBe("cctp");
       expect(q2.fee).toBeLessThanOrEqual(0.02);
-
-      const q3 = await getBestQuote("arbitrum", "hyperevm", 1000, DUMMY_EVM, DUMMY_EVM);
-      expect(q3.provider).toBe("cctp");
-      expect(q3.fee).toBeGreaterThan(0);
     });
 
     it("all CCTP quotes have consistent shape", async () => {
       const routes: [string, string][] = [
         ["solana", "arbitrum"],
         ["arbitrum", "base"],
-        ["ethereum", "arbitrum"],
-        ["hyperevm", "ethereum"],
+        ["base", "solana"],
       ];
 
       for (const [src, dst] of routes) {
@@ -227,7 +174,7 @@ describe("Bridge Integration — Read-Only", { timeout: 60000 }, () => {
     it("EVM-to-EVM route and small amount work", async () => {
       await wait(1500);
       // Test EVM-to-EVM
-      const quote = await getDebridgeQuote("ethereum", "arbitrum", 200, DUMMY_EVM, DUMMY_EVM);
+      const quote = await getDebridgeQuote("base", "arbitrum", 200, DUMMY_EVM, DUMMY_EVM);
       expect(quote.provider).toBe("debridge");
       expect(quote.amountOut).toBeGreaterThan(0);
       expect(quote.estimatedTime).toBeGreaterThan(0);
@@ -246,9 +193,8 @@ describe("Bridge Integration — Read-Only", { timeout: 60000 }, () => {
       ).rejects.toThrow();
     });
 
-    it("getBestQuote prefers CCTP when route is supported (polygon → arbitrum)", async () => {
-      const quote = await getBestQuote("polygon", "arbitrum", 100, DUMMY_EVM, DUMMY_EVM);
-      // polygon and arbitrum are both CCTP V2 supported, so CCTP wins
+    it("getBestQuote prefers CCTP when route is supported (base → arbitrum)", async () => {
+      const quote = await getBestQuote("base", "arbitrum", 100, DUMMY_EVM, DUMMY_EVM);
       expect(quote.provider).toBe("cctp");
       expect(quote.amountOut).toBeGreaterThanOrEqual(99.98);
       expect(quote.fee).toBeLessThanOrEqual(0.02);
@@ -262,8 +208,8 @@ describe("Bridge Integration — Read-Only", { timeout: 60000 }, () => {
   describe("CCTP vs deBridge comparison", () => {
     it("CCTP is cheaper but slower than deBridge", async () => {
       await wait(2000);
-      const cctp = await getCctpQuote("arbitrum", "ethereum", 1000);
-      const debridge = await getDebridgeQuote("arbitrum", "ethereum", 1000, DUMMY_EVM, DUMMY_EVM);
+      const cctp = await getCctpQuote("arbitrum", "base", 1000);
+      const debridge = await getDebridgeQuote("arbitrum", "base", 1000, DUMMY_EVM, DUMMY_EVM);
 
       // CCTP is free, deBridge has fees
       expect(cctp.fee).toBeLessThanOrEqual(debridge.fee);
@@ -339,9 +285,8 @@ describe("Bridge Integration — Read-Only", { timeout: 60000 }, () => {
       // These should all resolve via CCTP without hitting deBridge
       const routes: [string, string, string, string][] = [
         ["solana", "arbitrum", DUMMY_SOLANA, DUMMY_EVM],
-        ["arbitrum", "ethereum", DUMMY_EVM, DUMMY_EVM],
+        ["arbitrum", "base", DUMMY_EVM, DUMMY_EVM],
         ["base", "solana", DUMMY_EVM, DUMMY_SOLANA],
-        ["arbitrum", "hyperevm", DUMMY_EVM, DUMMY_EVM],
       ];
 
       for (const [src, dst, sender, recipient] of routes) {

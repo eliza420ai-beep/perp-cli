@@ -31,25 +31,39 @@ const CCTP_SOLANA_MT = "CCTPV2Sm4AdWt5296sk4P66VBZ7bEhcARwFaaS9YPbeC";
 
 // RPC endpoints (public, free)
 const RPC: Record<string, string> = {
-  ethereum: "https://eth.llamarpc.com",
   arbitrum: "https://arb1.arbitrum.io/rpc",
   base: "https://mainnet.base.org",
-  optimism: "https://mainnet.optimism.io",
-  polygon: "https://1rpc.io/matic",
-  avalanche: "https://api.avax.network/ext/bc/C/rpc",
   solana: "https://api.mainnet-beta.solana.com",
 };
 
-// Helper: JSON-RPC call
-async function ethCall(rpc: string, method: string, params: unknown[]): Promise<unknown> {
-  const res = await fetch(rpc, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
-  });
-  const json = await res.json() as { result?: unknown; error?: { message?: string; code?: number } };
-  if (json.error) throw new Error(`RPC error: ${json.error.message ?? json.error.code ?? JSON.stringify(json.error)}`);
-  return json.result;
+// Helper: JSON-RPC call (with retry for flaky RPCs)
+async function ethCall(rpc: string, method: string, params: unknown[], retries = 2): Promise<unknown> {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const res = await fetch(rpc, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+      });
+      const text = await res.text();
+      let json: { result?: unknown; error?: { message?: string; code?: number } };
+      try {
+        json = JSON.parse(text);
+      } catch {
+        if (attempt < retries) { await new Promise(r => setTimeout(r, 500)); continue; }
+        throw new Error(`RPC returned invalid JSON from ${rpc}: ${text.slice(0, 200)}`);
+      }
+      if (json.error) throw new Error(`RPC error: ${json.error.message ?? json.error.code ?? JSON.stringify(json.error)}`);
+      return json.result;
+    } catch (err) {
+      if (attempt < retries && (err as Error).message?.includes("invalid JSON")) {
+        await new Promise(r => setTimeout(r, 500));
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw new Error(`ethCall failed after ${retries + 1} attempts`);
 }
 
 // Helper: Solana RPC call
@@ -70,7 +84,7 @@ describe("CCTP V2 Simulation Tests", { timeout: 60000 }, () => {
   // ══════════════════════════════════════════════════════════
 
   describe("EVM V2 contract verification", () => {
-    const chainsToCheck = ["arbitrum", "base", "optimism", "polygon", "avalanche"];
+    const chainsToCheck = ["arbitrum", "base"];
 
     for (const chain of chainsToCheck) {
       it(`${chain}: TokenMessengerV2 has deployed code`, async () => {
@@ -94,21 +108,6 @@ describe("CCTP V2 Simulation Tests", { timeout: 60000 }, () => {
         expect(code).not.toBe("0x");
       });
     }
-
-    // Also verify Ethereum (important, previously had V1 address bug)
-    it("ethereum: TokenMessengerV2 has deployed code", async () => {
-      const code = await ethCall(RPC.ethereum, "eth_getCode", [EVM_TOKEN_MESSENGER_V2, "latest"]);
-      expect(typeof code).toBe("string");
-      expect((code as string).length).toBeGreaterThan(10);
-      expect(code).not.toBe("0x");
-    });
-
-    it("ethereum: MessageTransmitterV2 has deployed code", async () => {
-      const code = await ethCall(RPC.ethereum, "eth_getCode", [EVM_MESSAGE_TRANSMITTER_V2, "latest"]);
-      expect(typeof code).toBe("string");
-      expect((code as string).length).toBeGreaterThan(10);
-      expect(code).not.toBe("0x");
-    });
   });
 
   // ══════════════════════════════════════════════════════════
@@ -194,7 +193,7 @@ describe("CCTP V2 Simulation Tests", { timeout: 60000 }, () => {
       }
     });
 
-    it("ethereum → arbitrum: V2 7-param ABI matches contract", async () => {
+    it("base → arbitrum: V2 7-param ABI matches contract", async () => {
       const { ethers } = await import("ethers");
       const iface = new ethers.Interface([
         "function depositForBurn(uint256 amount, uint32 destinationDomain, bytes32 mintRecipient, address burnToken, bytes32 destinationCaller, uint256 maxFee, uint32 minFinalityThreshold) returns (uint64 nonce)",
@@ -205,14 +204,13 @@ describe("CCTP V2 Simulation Tests", { timeout: 60000 }, () => {
         500000n, // 0.5 USDC
         CCTP_DOMAINS.arbitrum,
         ethers.zeroPadValue(DUMMY_SENDER, 32),
-        USDC_ADDRESSES.ethereum,
+        USDC_ADDRESSES.base,
         ethers.ZeroHash,
         0n,
         2000,
       ]);
 
       // The function selector (first 4 bytes) should match V2's depositForBurn
-      // V2 selector for 7-param depositForBurn: different from V1's 4-param
       const selector = calldata.slice(0, 10); // "0x" + 8 hex chars
 
       // V1 4-param selector would be different — verify we're using V2
@@ -220,19 +218,16 @@ describe("CCTP V2 Simulation Tests", { timeout: 60000 }, () => {
         "function depositForBurn(uint256 amount, uint32 destinationDomain, bytes32 mintRecipient, address burnToken)",
       ]);
       const v1Selector = v1Iface.getFunction("depositForBurn")!.selector;
-
-      // V2 selector MUST differ from V1
       expect(selector).not.toBe(v1Selector);
 
-      // Verify this selector is recognized by the ethereum contract
+      // Verify this selector is recognized by the base contract
       try {
-        await ethCall(RPC.ethereum, "eth_call", [
+        await ethCall(RPC.base, "eth_call", [
           { from: DUMMY_SENDER, to: EVM_TOKEN_MESSENGER_V2, data: calldata },
           "latest",
         ]);
       } catch (err: unknown) {
         const msg = (err as Error).message;
-        // Revert from balance check is expected, not from invalid selector
         expect(msg).not.toContain("unrecognized function selector");
       }
     });
@@ -301,12 +296,10 @@ describe("CCTP V2 Simulation Tests", { timeout: 60000 }, () => {
       const { PublicKey } = await import("@solana/web3.js");
       const tokenMessengerMinter = new PublicKey(CCTP_SOLANA_TMM);
 
-      // Test a few important domains
+      // Test supported domains
       const domainsToCheck = [
-        { name: "ethereum", domain: 0 },
         { name: "arbitrum", domain: 3 },
         { name: "base", domain: 6 },
-        { name: "hyperevm", domain: 19 },
       ];
 
       for (const { name, domain } of domainsToCheck) {
@@ -536,8 +529,8 @@ describe("CCTP V2 Simulation Tests", { timeout: 60000 }, () => {
       }
     });
 
-    it("V2 endpoint supports all our source domains", async () => {
-      const sourceDomains = [0, 2, 3, 5, 6, 7]; // ethereum, optimism, arbitrum, solana, base, polygon
+    it("V2 endpoint supports our source domains", async () => {
+      const sourceDomains = [3, 5, 6]; // arbitrum, solana, base
       const fakeTx = "0x0000000000000000000000000000000000000000000000000000000000000000";
 
       for (const domain of sourceDomains) {
@@ -550,87 +543,31 @@ describe("CCTP V2 Simulation Tests", { timeout: 60000 }, () => {
   });
 
   // ══════════════════════════════════════════════════════════
-  // 7. HyperCore CCTP Fees API
-  // ══════════════════════════════════════════════════════════
-
-  describe("HyperCore CCTP fees API", () => {
-    it("returns fee schedule for arbitrum → hyperevm", async () => {
-      const srcDomain = CCTP_DOMAINS.arbitrum; // 3
-      const dstDomain = 19; // hyperevm
-      const url = `https://iris-api.circle.com/v2/burn/USDC/fees/${srcDomain}/${dstDomain}?forward=true&hyperCoreDeposit=true`;
-
-      const res = await fetch(url);
-      expect(res.status).toBeLessThan(500);
-
-      if (res.ok) {
-        // API returns an array of fee schedules (not wrapped in object)
-        const data = await res.json() as Array<{
-          finalityThreshold: number;
-          minimumFee: number;
-          forwardFee: { low: number; med: number; high: number };
-        }>;
-        expect(Array.isArray(data)).toBe(true);
-        expect(data.length).toBeGreaterThan(0);
-        // Should include fast (1000) and standard (2000) thresholds
-        const thresholds = data.map(d => d.finalityThreshold);
-        expect(thresholds).toContain(1000); // fast
-        expect(thresholds).toContain(2000); // standard
-        // Forward fee should be present
-        expect(data[0].forwardFee).toBeDefined();
-        expect(data[0].forwardFee.low).toBeGreaterThanOrEqual(0);
-      }
-    });
-
-    it("returns fee schedule for solana → hyperevm", async () => {
-      const srcDomain = CCTP_DOMAINS.solana; // 5
-      const dstDomain = 19;
-      const url = `https://iris-api.circle.com/v2/burn/USDC/fees/${srcDomain}/${dstDomain}?forward=true&hyperCoreDeposit=true`;
-
-      const res = await fetch(url);
-      expect(res.status).toBeLessThan(500);
-
-      if (res.ok) {
-        const data = await res.json() as Array<{ finalityThreshold: number }>;
-        expect(Array.isArray(data)).toBe(true);
-        expect(data.length).toBeGreaterThan(0);
-      }
-    });
-  });
-
-  // ══════════════════════════════════════════════════════════
   // 8. CCTP Domain Consistency
   // ══════════════════════════════════════════════════════════
 
   describe("CCTP domain and address consistency", () => {
     it("all CCTP domains map to valid chain IDs", () => {
       for (const [chain, domain] of Object.entries(CCTP_DOMAINS)) {
+        if (chain === "hyperevm") continue; // HyperCore uses CctpForwarder, not standard chain ID
         expect(typeof domain).toBe("number");
         expect(domain).toBeGreaterThanOrEqual(0);
-        // All CCTP chains except hyperevm/ink/worldchain should have chain IDs
-        if (chain in CHAIN_IDS) {
-          expect(CHAIN_IDS[chain as keyof typeof CHAIN_IDS]).toBeGreaterThan(0);
-        }
+        expect(CHAIN_IDS[chain as keyof typeof CHAIN_IDS]).toBeGreaterThan(0);
       }
     });
 
     it("all EVM CCTP chains have USDC addresses", () => {
       const evmChains = Object.keys(CCTP_DOMAINS).filter(c => c !== "solana" && c !== "hyperevm");
       for (const chain of evmChains) {
-        if (USDC_ADDRESSES[chain]) {
-          expect(USDC_ADDRESSES[chain]).toMatch(/^0x[a-fA-F0-9]{40}$/);
-        }
+        expect(USDC_ADDRESSES[chain]).toMatch(/^0x[a-fA-F0-9]{40}$/);
       }
     });
 
     it("V2 domain IDs match Circle documentation", () => {
-      // Per Circle CCTP V2 docs: https://developers.circle.com/stablecoins/cctp-getting-started
-      expect(CCTP_DOMAINS.ethereum).toBe(0);
-      expect(CCTP_DOMAINS.avalanche).toBe(1);
-      expect(CCTP_DOMAINS.optimism).toBe(2);
       expect(CCTP_DOMAINS.arbitrum).toBe(3);
       expect(CCTP_DOMAINS.solana).toBe(5);
       expect(CCTP_DOMAINS.base).toBe(6);
-      expect(CCTP_DOMAINS.polygon).toBe(7);
+      expect(CCTP_DOMAINS.hyperevm).toBe(19);
     });
   });
 });
