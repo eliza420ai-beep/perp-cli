@@ -1,5 +1,5 @@
 /**
- * Unified bridge engine: Circle CCTP V2 (primary, $0 fee) + deBridge DLN (fallback).
+ * Unified bridge engine: Circle CCTP V2 (primary, $0 fee) + Relay + deBridge DLN (fallback).
  *
  * CCTP V2 routes (all tested with real TX):
  *   Sol→EVM:  Circle auto-relay (free)
@@ -241,7 +241,7 @@ async function getHyperCoreCctpFees(
 
 // ── deBridge DLN API ──
 
-const DLN_API = "https://api.dln.trade/v1.0/dln/order";
+const DLN_API = "https://dln.debridge.finance/v1.0/dln/order";
 
 // Builder/affiliate config — set via env vars or defaults
 const DEBRIDGE_REFERRAL_CODE = process.env.DEBRIDGE_REFERRAL_CODE ?? "";
@@ -249,7 +249,7 @@ const DEBRIDGE_AFFILIATE_FEE_PERCENT = process.env.DEBRIDGE_AFFILIATE_FEE_PERCEN
 const DEBRIDGE_AFFILIATE_FEE_RECIPIENT = process.env.DEBRIDGE_AFFILIATE_FEE_RECIPIENT ?? "";
 
 export interface BridgeQuote {
-  provider: "debridge" | "cctp";
+  provider: "debridge" | "cctp" | "relay";
   srcChain: string;
   dstChain: string;
   amountIn: number;      // USDC
@@ -1640,10 +1640,143 @@ async function pollCctpV2Attestation(
   return { message: null, attestation: null };
 }
 
+// ── Relay Bridge API ──
+
+const RELAY_API = "https://api.relay.link";
+
+// Relay chain IDs (same as standard EVM chain IDs, Solana = 792703809)
+const RELAY_CHAIN_IDS: Record<string, number> = {
+  solana: 792703809,
+  ethereum: 1,
+  arbitrum: 42161,
+  base: 8453,
+  optimism: 10,
+  avalanche: 43114,
+  polygon: 137,
+  linea: 59144,
+  bnb: 56,
+  hyperevm: 999,  // Relay uses custom ID for Hyperliquid
+};
+
+export async function getRelayQuote(
+  srcChain: string,
+  dstChain: string,
+  amountUsdc: number,
+  senderAddress: string,
+  recipientAddress: string,
+): Promise<BridgeQuote> {
+  const srcChainId = RELAY_CHAIN_IDS[srcChain];
+  const dstChainId = RELAY_CHAIN_IDS[dstChain];
+  if (!srcChainId || !dstChainId) throw new Error(`Relay: unsupported chain ${srcChain} or ${dstChain}`);
+
+  const srcToken = USDC_ADDRESSES[srcChain];
+  const dstToken = USDC_ADDRESSES[dstChain];
+  if (!srcToken || !dstToken) throw new Error(`No USDC for ${srcChain} or ${dstChain}`);
+
+  const amountRaw = String(Math.round(amountUsdc * 1e6));
+
+  const body = {
+    user: senderAddress,
+    recipient: recipientAddress,
+    originChainId: srcChainId,
+    destinationChainId: dstChainId,
+    originCurrency: srcToken,
+    destinationCurrency: dstToken,
+    amount: amountRaw,
+    tradeType: "EXACT_INPUT",
+  };
+
+  const res = await fetch(`${RELAY_API}/quote`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`Relay quote failed: ${res.status} ${errText}`);
+  }
+
+  const data = await res.json() as Record<string, unknown>;
+  const details = data.details as Record<string, unknown> | undefined;
+  const fees = data.fees as Record<string, unknown> | undefined;
+
+  const currencyOut = details?.currencyOut as Record<string, unknown> | undefined;
+  const amountOut = Number(currencyOut?.amountFormatted ?? 0);
+
+  const relayerFee = fees?.relayer as Record<string, unknown> | undefined;
+  const feeUsd = Number(relayerFee?.amountUsd ?? 0);
+
+  const timeEstimate = Number(details?.timeEstimate ?? 30);
+
+  return {
+    provider: "relay",
+    srcChain,
+    dstChain,
+    amountIn: amountUsdc,
+    amountOut: amountOut || (amountUsdc - feeUsd),
+    fee: feeUsd || (amountUsdc - amountOut),
+    estimatedTime: timeEstimate,
+    raw: data,
+  };
+}
+
+export async function executeRelayBridge(
+  bridgeQuote: BridgeQuote,
+  signerKey: string,
+): Promise<BridgeResult> {
+  const { srcChain, dstChain, amountIn, amountOut } = bridgeQuote;
+  const data = bridgeQuote.raw as Record<string, unknown>;
+
+  const steps = data.steps as Array<Record<string, unknown>> | undefined;
+  if (!steps || steps.length === 0) throw new Error("Relay: no steps in quote");
+
+  let txHash = "";
+
+  for (const step of steps) {
+    const kind = step.kind as string;
+    const items = step.items as Array<Record<string, unknown>> | undefined;
+    if (!items) continue;
+
+    for (const item of items) {
+      const itemData = item.data as Record<string, unknown> | undefined;
+      if (!itemData) continue;
+
+      if (kind === "transaction") {
+        if (srcChain === "solana") {
+          // Solana transaction
+          const txData = String(itemData.data ?? "");
+          if (txData) {
+            txHash = await submitSolanaTransaction({ data: txData } as Record<string, unknown>, signerKey);
+          }
+        } else {
+          // EVM transaction
+          txHash = await submitEvmTransaction(
+            { to: itemData.to, data: itemData.data, value: itemData.value ?? "0" },
+            signerKey,
+            srcChain,
+          );
+        }
+      }
+    }
+  }
+
+  if (!txHash) throw new Error("Relay: no transaction executed");
+
+  return {
+    provider: "relay",
+    txHash,
+    srcChain,
+    dstChain,
+    amountIn,
+    amountOut,
+  };
+}
+
 /**
  * Get the best bridge quote. Strategy:
  * - CCTP primary ($0 fee) for all routes: Solana↔EVM, EVM↔EVM, →HyperCore
- * - deBridge DLN fallback
+ * - Relay + deBridge DLN in parallel, pick cheapest
  */
 export async function getBestQuote(
   srcChain: string,
@@ -1652,15 +1785,31 @@ export async function getBestQuote(
   senderAddress: string,
   recipientAddress: string,
 ): Promise<BridgeQuote> {
-  // Try CCTP first (all routes: EVM↔EVM, Solana↔EVM, →HyperCore)
+  // Try CCTP first ($0 fee)
   try {
     return await getCctpQuote(srcChain, dstChain, amountUsdc);
   } catch {
     // CCTP not available for this route
   }
 
-  // Fallback to deBridge
-  return getDebridgeQuote(srcChain, dstChain, amountUsdc, senderAddress, recipientAddress);
+  // Try Relay and deBridge in parallel, pick cheapest
+  const results = await Promise.allSettled([
+    getRelayQuote(srcChain, dstChain, amountUsdc, senderAddress, recipientAddress),
+    getDebridgeQuote(srcChain, dstChain, amountUsdc, senderAddress, recipientAddress),
+  ]);
+
+  const quotes: BridgeQuote[] = [];
+  for (const r of results) {
+    if (r.status === "fulfilled") quotes.push(r.value);
+  }
+
+  if (quotes.length === 0) {
+    throw new Error(`No bridge available for ${srcChain} → ${dstChain}`);
+  }
+
+  // Pick the one with lowest fee (highest amountOut)
+  quotes.sort((a, b) => b.amountOut - a.amountOut);
+  return quotes[0];
 }
 
 /**
@@ -1681,6 +1830,10 @@ export async function executeBestBridge(
     return executeCctpBridge(srcChain, dstChain, amountUsdc, signerKey, recipientAddress, dstSignerKey);
   }
 
+  if (quote.provider === "relay") {
+    return executeRelayBridge(quote, signerKey);
+  }
+
   return executeDebridgeBridge(quote, signerKey);
 }
 
@@ -1688,7 +1841,7 @@ export async function executeBestBridge(
  * Check bridge order status via deBridge.
  */
 export async function checkDebridgeStatus(orderId: string): Promise<Record<string, unknown>> {
-  const res = await fetch(`https://api.dln.trade/v1.0/dln/order/${orderId}/status`);
+  const res = await fetch(`${DLN_API}/${orderId}/status`);
   if (!res.ok) throw new Error(`Status check failed: ${res.status}`);
   return res.json() as Promise<Record<string, unknown>>;
 }
