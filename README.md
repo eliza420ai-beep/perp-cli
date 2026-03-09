@@ -145,6 +145,27 @@ perp alert add -t funding -s ETH --spread 30
 perp alert daemon --interval 30
 ```
 
+## Claude Code Agent Skill
+
+Install as a Claude Code plugin to let Claude trade for you:
+
+```bash
+# In Claude Code
+/plugin marketplace add hypurrquant/perp-cli
+/plugin install perp-trading@hypurrquant-perp-cli
+```
+
+Once installed, use `/perp-trading` in Claude Code:
+
+```
+/perp-trading status                          # Check all exchanges
+/perp-trading BTC 0.01 long on hyperliquid    # Natural language trading
+/perp-trading scan arb opportunities          # Find funding rate arb
+/perp-trading bridge 100 USDC solana to arb   # Cross-chain bridge
+```
+
+The skill includes safety guardrails (balance checks, user confirmation before trades, error handling with retries).
+
 ## AI Agent Integration
 
 Every command supports `--json` for structured output:
