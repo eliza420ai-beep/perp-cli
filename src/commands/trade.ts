@@ -52,7 +52,23 @@ export function registerTradeCommands(
         });
       }
 
-      const result = await adapter.marketOrder(symbol.toUpperCase(), s as "buy" | "sell", size);
+      let result: unknown;
+      try {
+        result = await adapter.marketOrder(symbol.toUpperCase(), s as "buy" | "sell", size);
+        logExecution({
+          type: "market_order", exchange: adapter.name, symbol: symbol.toUpperCase(),
+          side: s, size, status: "success", dryRun: false,
+          meta: clientId ? { clientOrderId: clientId } : undefined,
+        });
+      } catch (err) {
+        logExecution({
+          type: "market_order", exchange: adapter.name, symbol: symbol.toUpperCase(),
+          side: s, size, status: "failed", dryRun: false,
+          error: err instanceof Error ? err.message : String(err),
+          meta: clientId ? { clientOrderId: clientId } : undefined,
+        });
+        throw err;
+      }
 
       if (clientId) {
         logClientId({
@@ -83,7 +99,14 @@ export function registerTradeCommands(
         return;
       }
       const adapter = await getAdapter();
-      const result = await adapter.marketOrder(symbol.toUpperCase(), "buy", size);
+      let result: unknown;
+      try {
+        result = await adapter.marketOrder(symbol.toUpperCase(), "buy", size);
+        logExecution({ type: "market_order", exchange: adapter.name, symbol: symbol.toUpperCase(), side: "buy", size, status: "success", dryRun: false });
+      } catch (err) {
+        logExecution({ type: "market_order", exchange: adapter.name, symbol: symbol.toUpperCase(), side: "buy", size, status: "failed", dryRun: false, error: err instanceof Error ? err.message : String(err) });
+        throw err;
+      }
       if (isJson()) return printJson(jsonOk(clientId ? { ...result as object, clientOrderId: clientId } : result));
       console.log(chalk.green(`\n  Market BUY ${size} ${symbol.toUpperCase()} placed on ${adapter.name}.\n`));
       printJson(jsonOk(result));
@@ -104,7 +127,14 @@ export function registerTradeCommands(
         return;
       }
       const adapter = await getAdapter();
-      const result = await adapter.marketOrder(symbol.toUpperCase(), "sell", size);
+      let result: unknown;
+      try {
+        result = await adapter.marketOrder(symbol.toUpperCase(), "sell", size);
+        logExecution({ type: "market_order", exchange: adapter.name, symbol: symbol.toUpperCase(), side: "sell", size, status: "success", dryRun: false });
+      } catch (err) {
+        logExecution({ type: "market_order", exchange: adapter.name, symbol: symbol.toUpperCase(), side: "sell", size, status: "failed", dryRun: false, error: err instanceof Error ? err.message : String(err) });
+        throw err;
+      }
       if (isJson()) return printJson(jsonOk(clientId ? { ...result as object, clientOrderId: clientId } : result));
       console.log(chalk.green(`\n  Market SELL ${size} ${symbol.toUpperCase()} placed on ${adapter.name}.\n`));
       printJson(jsonOk(result));
@@ -139,7 +169,23 @@ export function registerTradeCommands(
         });
       }
 
-      const result = await adapter.limitOrder(symbol.toUpperCase(), s as "buy" | "sell", price, size);
+      let result: unknown;
+      try {
+        result = await adapter.limitOrder(symbol.toUpperCase(), s as "buy" | "sell", price, size);
+        logExecution({
+          type: "limit_order", exchange: adapter.name, symbol: symbol.toUpperCase(),
+          side: s, size, price, status: "success", dryRun: false,
+          meta: clientId ? { clientOrderId: clientId } : undefined,
+        });
+      } catch (err) {
+        logExecution({
+          type: "limit_order", exchange: adapter.name, symbol: symbol.toUpperCase(),
+          side: s, size, price, status: "failed", dryRun: false,
+          error: err instanceof Error ? err.message : String(err),
+          meta: clientId ? { clientOrderId: clientId } : undefined,
+        });
+        throw err;
+      }
 
       if (clientId) {
         logClientId({
