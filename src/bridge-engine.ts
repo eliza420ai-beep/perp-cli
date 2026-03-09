@@ -214,13 +214,16 @@ export async function checkBridgeGasBalance(
 ): Promise<{ ok: boolean; errors: string[] }> {
   const errors: string[] = [];
 
-  const srcMin = MIN_GAS[srcChain];
-  if (srcMin) {
-    const srcGas = await getNativeGasBalance(srcChain, srcAddress);
-    if (srcGas < srcMin.amount) {
-      errors.push(
-        `Source ${srcChain}: ${srcGas.toFixed(6)} ${srcMin.symbol} (need ≥${srcMin.amount} ${srcMin.symbol})`
-      );
+  // HyperCore → EVM uses HL exchange API (no on-chain gas needed on src)
+  if (srcChain !== "hyperliquid") {
+    const srcMin = MIN_GAS[srcChain];
+    if (srcMin) {
+      const srcGas = await getNativeGasBalance(srcChain, srcAddress);
+      if (srcGas < srcMin.amount) {
+        errors.push(
+          `Source ${srcChain}: ${srcGas.toFixed(6)} ${srcMin.symbol} (need ≥${srcMin.amount} ${srcMin.symbol})`
+        );
+      }
     }
   }
 
@@ -979,7 +982,8 @@ async function executeCctpHyperCoreToEvm(
 
   return {
     provider: "cctp (HyperCore → EVM via sendToEvmWithData)",
-    txHash: typeof result.response === "string" ? result.response : JSON.stringify(result.response ?? result.data ?? "submitted"),
+    txHash: typeof result.response === "string" ? result.response
+      : (result.response as Record<string, unknown>)?.data?.hash ?? `hl-withdrawal-${timestamp}`,
     srcChain: "hyperliquid",
     dstChain,
     amountIn: amountUsdc,
