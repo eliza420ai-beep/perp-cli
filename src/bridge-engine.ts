@@ -6,7 +6,7 @@
  *   EVM→EVM:  attestation poll + manual receiveMessage on dest chain
  *   EVM→Sol:  attestation poll + Solana receiveMessage (ALT + 400k CU)
  *
- * Handles USDC bridging between Solana ↔ Arbitrum ↔ Base ↔ Ethereum
+ * Handles USDC bridging between Solana ↔ Arbitrum ↔ Base ↔ HyperCore
  * for cross-exchange rebalancing in funding arb.
  */
 
@@ -14,96 +14,104 @@
 
 export const CHAIN_IDS = {
   solana: 7565164,
-  ethereum: 1,
   arbitrum: 42161,
   base: 8453,
-  optimism: 10,
-  avalanche: 43114,
-  polygon: 137,
-  unichain: 130,
-  linea: 59144,
-  sonic: 146,
-  worldchain: 480,
-  bnb: 56,
-  ink: 57073,
 } as const;
 
 export const USDC_ADDRESSES: Record<string, string> = {
   solana: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
-  ethereum: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
   arbitrum: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
   base: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-  optimism: "0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85",
-  avalanche: "0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E",
-  polygon: "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359",
-  unichain: "0x078D782b760474a361dDA0AF3839290b0EF57AD6",
-  linea: "0x176211869cA2b568f2A7D4EE941E073a821EE1ff",
-  sonic: "0x29219dd400f2Bf60E5a23d13Be72B486D4038894",
-  bnb: "0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d",
 };
 
 // Exchange → chain mapping
 export const EXCHANGE_TO_CHAIN: Record<string, string> = {
   pacifica: "solana",
-  hyperliquid: "hyperevm", // HyperCore CCTP: direct deposit to perps via CctpForwarder (domain 19)
-  lighter: "ethereum",
+  hyperliquid: "hyperliquid", // HyperCore CCTP: direct deposit to perps via CctpForwarder (domain 19)
+  lighter: "arbitrum",
 };
 
 // Chain → RPC URLs
 const RPC_URLS: Record<string, string> = {
   solana: "https://api.mainnet-beta.solana.com",
-  ethereum: "https://eth.llamarpc.com",
   arbitrum: "https://arb1.arbitrum.io/rpc",
   base: "https://mainnet.base.org",
-  optimism: "https://mainnet.optimism.io",
-  avalanche: "https://api.avax.network/ext/bc/C/rpc",
-  polygon: "https://1rpc.io/matic",
-  unichain: "https://mainnet.unichain.org",
-  linea: "https://rpc.linea.build",
-  sonic: "https://rpc.soniclabs.com",
-  worldchain: "https://worldchain-mainnet.g.alchemy.com/public",
-  bnb: "https://bsc-dataseed.binance.org",
-  ink: "https://rpc-gel.inkonchain.com",
-  hyperevm: "https://rpc.hyperliquid.xyz/evm",
+  hyperliquid: "https://rpc.hyperliquid.xyz/evm",
 };
 
-// ── CCTP V2 Auto-Relay Fee Config ──
-// Circle V2 relay: maxFee > 0 → Circle relayer calls receiveMessage automatically.
-// Standard (finality=2000): minimumFee=0 (free relay), but we set a small fee for reliability.
-// Fast (finality=1000): minimumFee=$1-1.3 depending on route.
-const CCTP_RELAY_FEE_API = "https://iris-api.circle.com/v2/burn/USDC/fees";
+// ── CCTP V2 Forwarding Service ──
+// Circle Forwarding Service: Circle handles dst chain mint for you.
+// Use depositForBurnWithHook + forward hook data → no manual receiveMessage needed.
+// Service fee: $0.20 (non-Ethereum), $1.25 (Ethereum).
+// Note: Forwarding NOT supported when dst=Solana (EVM→Solana must use manual relay).
+const CCTP_FEE_API = "https://iris-api.circle.com/v2/burn/USDC/fees";
+
+// Static forward hook data: magic bytes ("cctp-forward") + version(0) + empty data length(0)
+const CCTP_FORWARD_HOOK_DATA = "0x636374702d666f72776172640000000000000000000000000000000000000000";
 
 /**
- * Get CCTP V2 relay fee for a route.
+ * Get CCTP V2 fee for a route.
+ *
+ * Fee structure (from Circle docs):
+ * - minimumFee: in basis points (e.g. 1.3 = 0.013%). Protocol fee = amount × bps / 10000.
+ * - Standard (finality=2000): minimumFee=0 → FREE protocol fee.
+ * - Fast (finality=1000): minimumFee=0-14 bps → e.g. $0.13 per $1000 at 1.3 bps.
+ * - forwardFee: in USDC subunits (6 decimals). Covers dst gas + Circle service (~$0.20).
+ *
+ * @param amountUsdc - Transfer amount in USDC (needed to calculate bps-based fee).
  * Returns maxFee in USDC subunits (6 decimals).
  */
 async function getCctpRelayFee(
   srcDomain: number,
   dstDomain: number,
   finalityThreshold: number = 2000,
-): Promise<{ maxFee: bigint; feeUsdc: number }> {
+  useForwarding: boolean = false,
+  amountUsdc: number = 100,
+): Promise<{ maxFee: bigint; feeUsdc: number; forwardingAvailable: boolean }> {
   try {
-    const res = await fetch(`${CCTP_RELAY_FEE_API}/${srcDomain}/${dstDomain}`);
+    const qs = useForwarding ? "?forward=true" : "";
+    const res = await fetch(`${CCTP_FEE_API}/${srcDomain}/${dstDomain}${qs}`);
     if (res.ok) {
-      const schedules = await res.json() as Array<{
+      const body = await res.json();
+      // Check for forwarding error response
+      if (body && typeof body === "object" && "error" in body) {
+        if (useForwarding) return getCctpRelayFee(srcDomain, dstDomain, finalityThreshold, false, amountUsdc);
+      }
+      const schedules = body as Array<{
         finalityThreshold: number;
-        minimumFee: number;
+        minimumFee: number; // basis points (e.g. 1.3 = 0.013%)
+        forwardFee?: { low: number; med: number; high: number }; // USDC subunits
       }>;
       const schedule = schedules.find(s => s.finalityThreshold === finalityThreshold) ?? schedules[0];
       if (schedule) {
-        // minimumFee is in USDC (e.g. 0, 1.0, 1.3). Add 10% buffer for reliability.
-        const feeUsdc = schedule.minimumFee > 0
-          ? Math.ceil(schedule.minimumFee * 1.1 * 100) / 100  // round up to cents
-          : 0.01; // $0.01 minimum to incentivize relay even for "free" routes
-        return { maxFee: BigInt(Math.round(feeUsdc * 1e6)), feeUsdc };
+        // Protocol fee: minimumFee is in basis points → actual fee = amount × bps / 10000
+        const amountSubunits = BigInt(Math.round(amountUsdc * 1e6));
+        const bpsRounded = BigInt(Math.round(schedule.minimumFee * 100));
+        const protocolFee = (amountSubunits * bpsRounded) / 1_000_000n;
+        // Add 20% buffer per Circle docs recommendation
+        const protocolFeeBuffered = (protocolFee * 120n) / 100n;
+
+        if (schedule.forwardFee) {
+          // Forwarding: protocol fee + forwarding service fee
+          const forwardFeeSubunits = BigInt(schedule.forwardFee.high);
+          const totalMaxFee = protocolFeeBuffered + forwardFeeSubunits;
+          const totalFeeUsdc = Number(totalMaxFee) / 1e6;
+          return { maxFee: totalMaxFee, feeUsdc: totalFeeUsdc, forwardingAvailable: true };
+        }
+
+        // No forwarding — protocol fee only (or minimal for standard to incentivize relay)
+        if (protocolFeeBuffered > 0n) {
+          return { maxFee: protocolFeeBuffered, feeUsdc: Number(protocolFeeBuffered) / 1e6, forwardingAvailable: false };
+        }
+        // Standard (free): set small maxFee to incentivize relay
+        return { maxFee: 10000n, feeUsdc: 0.01, forwardingAvailable: false }; // $0.01
       }
     }
   } catch {
     // fallback
   }
-  // Default: $0.01 for standard, $1.50 for fast
-  const fallback = finalityThreshold === 1000 ? 1.50 : 0.01;
-  return { maxFee: BigInt(Math.round(fallback * 1e6)), feeUsdc: fallback };
+  const fallback = finalityThreshold === 1000 ? 0.50 : 0.25;
+  return { maxFee: BigInt(Math.round(fallback * 1e6)), feeUsdc: fallback, forwardingAvailable: useForwarding };
 }
 
 // ── Balance Check ──
@@ -163,6 +171,75 @@ export async function checkBridgeBalance(
     ? await getSolanaUsdcBalance(senderAddress)
     : await getEvmUsdcBalance(srcChain, senderAddress);
   return { balance, sufficient: balance >= requiredAmount };
+}
+
+/**
+ * Get native gas token balance (ETH for EVM, SOL for Solana).
+ * Returns balance in human-readable units.
+ */
+export async function getNativeGasBalance(chain: string, address: string): Promise<number> {
+  if (chain === "solana") {
+    const { Connection, PublicKey, LAMPORTS_PER_SOL } = await import("@solana/web3.js");
+    const connection = new Connection(RPC_URLS.solana, "confirmed");
+    const balance = await connection.getBalance(new PublicKey(address));
+    return balance / LAMPORTS_PER_SOL;
+  }
+
+  const { ethers } = await import("ethers");
+  const rpc = RPC_URLS[chain];
+  if (!rpc) throw new Error(`No RPC for ${chain}`);
+  const provider = new ethers.JsonRpcProvider(rpc);
+  const balance = await provider.getBalance(address);
+  return Number(ethers.formatEther(balance));
+}
+
+// Minimum gas thresholds for bridge transactions
+const MIN_GAS: Record<string, { amount: number; symbol: string }> = {
+  solana:   { amount: 0.01,   symbol: "SOL" },
+  arbitrum: { amount: 0.0001, symbol: "ETH" },
+  base:     { amount: 0.0001, symbol: "ETH" },
+  hyperliquid: { amount: 0.0001, symbol: "ETH" },
+};
+
+/**
+ * Check gas balance on source (and optionally destination) chains before bridging.
+ * Returns errors for any chain with insufficient gas.
+ */
+export async function checkBridgeGasBalance(
+  srcChain: string,
+  srcAddress: string,
+  dstChain: string,
+  dstAddress: string,
+  needsDstGas: boolean,
+): Promise<{ ok: boolean; errors: string[] }> {
+  const errors: string[] = [];
+
+  // HyperCore → EVM uses HL exchange API (no on-chain gas needed on src)
+  if (srcChain !== "hyperliquid") {
+    const srcMin = MIN_GAS[srcChain];
+    if (srcMin) {
+      const srcGas = await getNativeGasBalance(srcChain, srcAddress);
+      if (srcGas < srcMin.amount) {
+        errors.push(
+          `Source ${srcChain}: ${srcGas.toFixed(6)} ${srcMin.symbol} (need ≥${srcMin.amount} ${srcMin.symbol})`
+        );
+      }
+    }
+  }
+
+  if (needsDstGas) {
+    const dstMin = MIN_GAS[dstChain];
+    if (dstMin) {
+      const dstGas = await getNativeGasBalance(dstChain, dstAddress);
+      if (dstGas < dstMin.amount) {
+        errors.push(
+          `Destination ${dstChain}: ${dstGas.toFixed(6)} ${dstMin.symbol} (need ≥${dstMin.amount} ${dstMin.symbol})`
+        );
+      }
+    }
+  }
+
+  return { ok: errors.length === 0, errors };
 }
 
 // ── HyperCore CCTP (Solana/EVM → Hyperliquid perps via CctpForwarder) ──
@@ -435,7 +512,7 @@ async function submitSolanaTransaction(tx: Record<string, unknown>, signerKey: s
 async function submitEvmTransaction(tx: Record<string, unknown>, privateKey: string, chain: string): Promise<string> {
   const { ethers } = await import("ethers");
 
-  const rpc = RPC_URLS[chain] ?? RPC_URLS.ethereum;
+  const rpc = RPC_URLS[chain] ?? RPC_URLS.arbitrum;
   const provider = new ethers.JsonRpcProvider(rpc);
   const wallet = new ethers.Wallet(privateKey, provider);
 
@@ -472,20 +549,10 @@ async function submitEvmTransaction(tx: Record<string, unknown>, privateKey: str
 // ── Circle CCTP V2 (EVM + Solana) ──
 
 export const CCTP_DOMAINS: Record<string, number> = {
-  ethereum: 0,
-  avalanche: 1,
-  optimism: 2,
   arbitrum: 3,
   solana: 5,
   base: 6,
-  polygon: 7,
-  unichain: 10,
-  linea: 11,
-  sonic: 13,
-  worldchain: 14,
-  bnb: 17,
-  hyperevm: 19,
-  ink: 21,
+  hyperliquid: 19,
 };
 
 // EVM V2 contracts — ALL EVM chains use the same V2 proxy addresses (per Circle docs)
@@ -521,17 +588,25 @@ function isCctpSupported(chain: string): boolean {
 
 /**
  * Get a CCTP V2 bridge quote. Supports EVM ↔ EVM, Solana ↔ EVM, and → HyperCore.
+ *
+ * Uses Circle Forwarding Service when available (all routes except →Solana):
+ * - Circle handles dst chain mint automatically, no manual receiveMessage needed.
+ * - Service fee ~$0.20 (included in maxFee).
+ *
+ * @param fast - If true, use fast finality (1000): ~1-2 min, $1-1.3 + $0.20 forwarding.
+ *               If false (default), use standard finality (2000): ~2-5 min, ~$0.20 forwarding.
  */
 export async function getCctpQuote(
   srcChain: string,
   dstChain: string,
   amountUsdc: number,
+  fast: boolean = false,
 ): Promise<BridgeQuote> {
   if (!isCctpSupported(srcChain)) throw new Error(`CCTP not supported on ${srcChain}`);
   if (!isCctpSupported(dstChain)) throw new Error(`CCTP not supported on ${dstChain}`);
 
   // HyperCore → EVM: HL withdrawal + CCTP forwarding (~0.20 USDC fee)
-  if (srcChain === "hyperevm") {
+  if (srcChain === "hyperliquid") {
     const forwardingFee = 0.20; // CCTP forwarding fee for Arbitrum
     return {
       provider: "cctp",
@@ -543,18 +618,18 @@ export async function getCctpQuote(
       estimatedTime: 60, // ~1 min with fast finality
       gasIncluded: true,
       gasNote: "HyperCore handles forwarding",
-      raw: { type: "cctp-hypercore-withdraw" },
+      raw: { type: "cctp-hypercore-withdraw", fast },
     };
   }
 
-  const isHyperCore = dstChain === "hyperevm";
+  const isHyperCore = dstChain === "hyperliquid";
 
   // HyperCore route has protocol fee + forwarding fee
   if (isHyperCore) {
     const srcDomain = CCTP_DOMAINS[srcChain];
     if (srcDomain === undefined) throw new Error(`No CCTP domain for ${srcChain}`);
     const fees = await getHyperCoreCctpFees(srcDomain, amountUsdc);
-    const estimatedTime = srcChain === "solana" ? 65 : srcChain === "ethereum" ? 900 : 60;
+    const estimatedTime = srcChain === "solana" ? 65 : 60;
     return {
       provider: "cctp",
       srcChain,
@@ -565,27 +640,25 @@ export async function getCctpQuote(
       estimatedTime,
       gasIncluded: true,
       gasNote: "CctpForwarder auto-deposits to HyperCore",
-      raw: { type: "cctp-hypercore", maxFee: fees.maxFee },
+      raw: { type: "cctp-hypercore", maxFee: fees.maxFee, fast },
     };
   }
 
-  // Standard CCTP V2 with auto-relay
-  let estimatedTime: number;
-  if (srcChain === "solana" || dstChain === "solana") {
-    estimatedTime = 65;
-  } else if (srcChain === "ethereum" || dstChain === "ethereum") {
-    estimatedTime = 900;
-  } else {
-    estimatedTime = 60;
-  }
-
-  // Fetch relay fee from Circle API
+  // Standard CCTP V2
+  const finality = fast ? 1000 : 2000;
   const srcDomain = CCTP_DOMAINS[srcChain];
   const dstDomain = CCTP_DOMAINS[dstChain];
-  const { maxFee, feeUsdc } = await getCctpRelayFee(srcDomain!, dstDomain!, 2000);
 
-  // maxFee > 0 means Circle relayer auto-relays. $0.01 is the minimum incentive.
-  const isAutoRelay = maxFee > 0n;
+  // Use Forwarding Service when dst is NOT Solana (Solana dst doesn't support forwarding)
+  const canForward = dstChain !== "solana";
+  const { maxFee, feeUsdc, forwardingAvailable } = await getCctpRelayFee(srcDomain!, dstDomain!, finality, canForward, amountUsdc);
+
+  const estimatedTime = fast
+    ? ((srcChain === "solana" || dstChain === "solana") ? 90 : 60)
+    : (forwardingAvailable
+      ? ((srcChain === "solana" || dstChain === "solana") ? 120 : 90)  // forwarding: Circle handles dst
+      : ((srcChain === "solana" || dstChain === "solana") ? 180 : 900) // manual relay
+    );
 
   return {
     provider: "cctp",
@@ -595,16 +668,21 @@ export async function getCctpQuote(
     amountOut: amountUsdc - feeUsdc,
     fee: feeUsdc,
     estimatedTime,
-    gasIncluded: isAutoRelay,
-    gasNote: isAutoRelay
-      ? `Auto-relay (maxFee $${feeUsdc.toFixed(2)} deducted from USDC)`
-      : "Manual — receiveMessage required on destination (dst gas needed)",
-    raw: { type: "cctp", maxFee: Number(maxFee) },
+    gasIncluded: fast || forwardingAvailable, // forwarding = Circle handles dst mint
+    gasNote: forwardingAvailable
+      ? `Forwarding Service (maxFee $${feeUsdc.toFixed(2)}, Circle handles dst mint)`
+      : fast
+        ? `Fast auto-relay (maxFee $${feeUsdc.toFixed(2)}, ~1-2 min)`
+        : `Standard relay → Solana (maxFee $${feeUsdc.toFixed(2)}, manual receiveMessage)`,
+    raw: { type: "cctp", maxFee: Number(maxFee), fast, forwarding: forwardingAvailable },
   };
 }
 
 /**
  * Execute a CCTP V2 bridge. Routes to the appropriate implementation.
+ *
+ * @param fast - If true, use fast finality (1000): Circle auto-relays, no manual receiveMessage.
+ *               If false (default), use standard finality (2000): cheaper but requires manual relay.
  */
 export async function executeCctpBridge(
   srcChain: string,
@@ -613,25 +691,26 @@ export async function executeCctpBridge(
   signerKey: string,
   recipientAddress: string,
   dstSignerKey?: string, // EVM key for receiveMessage (Solana→EVM) or Solana key for receiveMessage (EVM→Solana)
+  fast: boolean = false,
 ): Promise<BridgeResult> {
   // HyperCore route: depositForBurnWithHook via CctpForwarder
-  if (dstChain === "hyperevm") {
+  if (dstChain === "hyperliquid") {
     if (srcChain === "solana") {
       return executeCctpSolanaToHyperCore(amountUsdc, signerKey, recipientAddress);
     }
     return executeCctpEvmToHyperCore(srcChain, amountUsdc, signerKey, recipientAddress);
   }
   // HyperCore → EVM: sendToEvmWithData via HL exchange API
-  if (srcChain === "hyperevm") {
+  if (srcChain === "hyperliquid") {
     return executeCctpHyperCoreToEvm(dstChain, amountUsdc, signerKey, recipientAddress);
   }
   if (srcChain === "solana") {
-    return executeCctpSolanaToEvm(dstChain, amountUsdc, signerKey, recipientAddress, dstSignerKey);
+    return executeCctpSolanaToEvm(dstChain, amountUsdc, signerKey, recipientAddress, dstSignerKey, fast);
   }
   if (dstChain === "solana") {
-    return executeCctpEvmToSolana(srcChain, amountUsdc, signerKey, recipientAddress, dstSignerKey);
+    return executeCctpEvmToSolana(srcChain, amountUsdc, signerKey, recipientAddress, dstSignerKey, fast);
   }
-  return executeCctpEvmToEvm(srcChain, dstChain, amountUsdc, signerKey, recipientAddress);
+  return executeCctpEvmToEvm(srcChain, dstChain, amountUsdc, signerKey, recipientAddress, fast);
 }
 
 // ── CCTP: Solana → HyperCore (depositForBurnWithHook) ──
@@ -786,7 +865,7 @@ async function executeCctpSolanaToHyperCore(
     provider: "cctp (HyperCore)",
     txHash: signature,
     srcChain: "solana",
-    dstChain: "hyperevm",
+    dstChain: "hyperliquid",
     amountIn: amountUsdc,
     amountOut: amountUsdc - fees.totalFee,
   };
@@ -803,12 +882,10 @@ const CCTP_EXTENSION: Record<string, string> = {
 // USDC EIP-712 domain names per chain (for ReceiveWithAuthorization)
 const USDC_EIP712_NAME: Record<string, string> = {
   arbitrum: "USD Coin",
-  ethereum: "USD Coin",
   base: "USD Coin",
 };
 const USDC_EIP712_VERSION: Record<string, string> = {
   arbitrum: "2",
-  ethereum: "2",
   base: "2",
 };
 
@@ -905,15 +982,18 @@ async function executeCctpHyperCoreToEvm(
 
   return {
     provider: "cctp (HyperCore → EVM via sendToEvmWithData)",
-    txHash: typeof result.response === "string" ? result.response : JSON.stringify(result.response ?? result.data ?? "submitted"),
-    srcChain: "hyperevm",
+    txHash: typeof result.response === "string" ? result.response
+      : (result.response as Record<string, unknown>)?.data?.hash ?? `hl-withdrawal-${timestamp}`,
+    srcChain: "hyperliquid",
     dstChain,
     amountIn: amountUsdc,
     amountOut: amountUsdc, // forwarding fee deducted on-chain
   };
 }
 
-// ── CCTP: EVM → HyperCore (CctpExtension batchDepositForBurnWithAuth) ──
+// ── CCTP: EVM → HyperCore ──
+// Arbitrum: CctpExtension.batchDepositForBurnWithAuth (1-TX, no approve)
+// Other EVM chains: approve + TokenMessengerV2.depositForBurnWithHook (2-TX fallback)
 
 async function executeCctpEvmToHyperCore(
   srcChain: string,
@@ -922,16 +1002,13 @@ async function executeCctpEvmToHyperCore(
   recipientAddress: string,
 ): Promise<BridgeResult> {
   const { ethers } = await import("ethers");
-  const { randomBytes } = await import("crypto");
 
-  const srcRpc = RPC_URLS[srcChain] ?? RPC_URLS.ethereum;
+  const srcRpc = RPC_URLS[srcChain] ?? RPC_URLS.arbitrum;
   const srcProvider = new ethers.JsonRpcProvider(srcRpc);
   const srcWallet = new ethers.Wallet(signerKey, srcProvider);
 
   const usdcAddr = USDC_ADDRESSES[srcChain];
-  const cctpExtensionAddr = CCTP_EXTENSION[srcChain];
   if (!usdcAddr) throw new Error(`No USDC address for ${srcChain}`);
-  if (!cctpExtensionAddr) throw new Error(`CctpExtension not configured for ${srcChain}`);
 
   const srcDomain = CCTP_DOMAINS[srcChain];
   if (srcDomain === undefined) throw new Error(`No CCTP domain for ${srcChain}`);
@@ -941,68 +1018,95 @@ async function executeCctpEvmToHyperCore(
   const fees = await getHyperCoreCctpFees(srcDomain, amountUsdc);
   const amountRaw = BigInt(Math.round(amountUsdc * 1e6));
 
-  // ── Step 1: Sign EIP-3009 ReceiveWithAuthorization ──
-  // This authorizes CctpExtension to pull USDC from the sender (no approve TX needed)
-  const authNonce = "0x" + randomBytes(32).toString("hex");
-  const validAfter = 0;
-  const validBefore = Math.floor(Date.now() / 1000) + 3600; // 1 hour
-
-  const usdcDomain = {
-    name: USDC_EIP712_NAME[srcChain] ?? "USD Coin",
-    version: USDC_EIP712_VERSION[srcChain] ?? "2",
-    chainId,
-    verifyingContract: usdcAddr,
-  };
-
-  const receiveAuthTypes = {
-    ReceiveWithAuthorization: [
-      { name: "from", type: "address" },
-      { name: "to", type: "address" },
-      { name: "value", type: "uint256" },
-      { name: "validAfter", type: "uint256" },
-      { name: "validBefore", type: "uint256" },
-      { name: "nonce", type: "bytes32" },
-    ],
-  };
-
-  const receiveAuthValue = {
-    from: srcWallet.address,
-    to: cctpExtensionAddr,
-    value: amountRaw,
-    validAfter,
-    validBefore,
-    nonce: authNonce,
-  };
-
-  const sig = await srcWallet.signTypedData(usdcDomain, receiveAuthTypes, receiveAuthValue);
-  const { v, r, s } = ethers.Signature.from(sig);
-
-  // ── Step 2: Build burn params ──
   // mintRecipient & destinationCaller = CctpForwarder (bytes32)
   const forwarderBytes32 = ethers.zeroPadValue(HYPERCORE_CCTP_FORWARDER, 32);
-
-  // hookData for HyperCore perps deposit
   const hookData = encodeHyperCoreHookData(recipientAddress, HYPERCORE_DEX_PERPS);
 
-  // Auth tuple: (value, validAfter, validBefore, nonce, v, r, s)
-  const authParams = [amountRaw, validAfter, validBefore, authNonce, v, r, s];
+  const cctpExtensionAddr = CCTP_EXTENSION[srcChain];
 
-  // Burn tuple: (amount, destinationDomain, mintRecipient, destinationCaller, maxFee, minFinalityThreshold, hookData)
-  const burnParams = [amountRaw, HYPERCORE_CCTP_DOMAIN, forwarderBytes32, forwarderBytes32, BigInt(fees.maxFee), 1000, hookData];
+  let depositTx;
+  let providerLabel: string;
 
-  // ── Step 3: Call CctpExtension.batchDepositForBurnWithAuth ──
-  const cctpExtension = new ethers.Contract(cctpExtensionAddr, [
-    "function batchDepositForBurnWithAuth(tuple(uint256 value, uint256 validAfter, uint256 validBefore, bytes32 nonce, uint8 v, bytes32 r, bytes32 s) authParams, tuple(uint256 amount, uint32 destinationDomain, bytes32 mintRecipient, bytes32 destinationCaller, uint256 maxFee, uint32 minFinalityThreshold, bytes hookData) burnParams)",
-  ], srcWallet);
+  if (cctpExtensionAddr) {
+    // ── Path A: CctpExtension (Arbitrum) — single TX, no approve ──
+    const { randomBytes } = await import("crypto");
+    const authNonce = "0x" + randomBytes(32).toString("hex");
+    const validAfter = 0;
+    const validBefore = Math.floor(Date.now() / 1000) + 3600;
 
-  const depositTx = await cctpExtension.batchDepositForBurnWithAuth(authParams, burnParams);
+    const usdcDomain = {
+      name: USDC_EIP712_NAME[srcChain] ?? "USD Coin",
+      version: USDC_EIP712_VERSION[srcChain] ?? "2",
+      chainId,
+      verifyingContract: usdcAddr,
+    };
+
+    const receiveAuthTypes = {
+      ReceiveWithAuthorization: [
+        { name: "from", type: "address" },
+        { name: "to", type: "address" },
+        { name: "value", type: "uint256" },
+        { name: "validAfter", type: "uint256" },
+        { name: "validBefore", type: "uint256" },
+        { name: "nonce", type: "bytes32" },
+      ],
+    };
+
+    const receiveAuthValue = {
+      from: srcWallet.address,
+      to: cctpExtensionAddr,
+      value: amountRaw,
+      validAfter,
+      validBefore,
+      nonce: authNonce,
+    };
+
+    const sig = await srcWallet.signTypedData(usdcDomain, receiveAuthTypes, receiveAuthValue);
+    const { v, r, s } = ethers.Signature.from(sig);
+
+    const authParams = [amountRaw, validAfter, validBefore, authNonce, v, r, s];
+    const burnParams = [amountRaw, HYPERCORE_CCTP_DOMAIN, forwarderBytes32, forwarderBytes32, BigInt(fees.maxFee), 1000, hookData];
+
+    const cctpExtension = new ethers.Contract(cctpExtensionAddr, [
+      "function batchDepositForBurnWithAuth(tuple(uint256 value, uint256 validAfter, uint256 validBefore, bytes32 nonce, uint8 v, bytes32 r, bytes32 s) authParams, tuple(uint256 amount, uint32 destinationDomain, bytes32 mintRecipient, bytes32 destinationCaller, uint256 maxFee, uint32 minFinalityThreshold, bytes hookData) burnParams)",
+    ], srcWallet);
+
+    depositTx = await cctpExtension.batchDepositForBurnWithAuth(authParams, burnParams);
+    providerLabel = "cctp (HyperCore via CctpExtension)";
+  } else {
+    // ── Path B: approve + depositForBurnWithHook (Base, other EVM chains) ──
+    const tokenMessengerAddr = CCTP_TOKEN_MESSENGER[srcChain];
+    if (!tokenMessengerAddr) throw new Error(`CCTP not configured for ${srcChain}`);
+
+    const usdc = new ethers.Contract(usdcAddr, [
+      "function allowance(address,address) view returns (uint256)",
+      "function approve(address,uint256) returns (bool)",
+    ], srcWallet);
+
+    const allowance = await usdc.allowance(srcWallet.address, tokenMessengerAddr);
+    if (allowance < amountRaw) {
+      const approveTx = await usdc.approve(tokenMessengerAddr, ethers.MaxUint256);
+      await approveTx.wait();
+    }
+
+    const tokenMessenger = new ethers.Contract(tokenMessengerAddr, [
+      "function depositForBurnWithHook(uint256 amount, uint32 destinationDomain, bytes32 mintRecipient, address burnToken, bytes32 destinationCaller, uint256 maxFee, uint32 minFinalityThreshold, bytes hookData) returns (uint64 nonce)",
+    ], srcWallet);
+
+    depositTx = await tokenMessenger.depositForBurnWithHook(
+      amountRaw, HYPERCORE_CCTP_DOMAIN, forwarderBytes32, usdcAddr,
+      forwarderBytes32, BigInt(fees.maxFee), 1000, hookData,
+    );
+    providerLabel = "cctp (HyperCore via depositForBurnWithHook)";
+  }
+
   const receipt = await depositTx.wait();
 
   return {
-    provider: "cctp (HyperCore via CctpExtension)",
+    provider: providerLabel,
     txHash: receipt.hash,
     srcChain,
-    dstChain: "hyperevm",
+    dstChain: "hyperliquid",
     amountIn: amountUsdc,
     amountOut: amountUsdc - fees.totalFee,
   };
@@ -1016,10 +1120,11 @@ async function executeCctpEvmToEvm(
   amountUsdc: number,
   signerKey: string,
   recipientAddress: string,
+  fast: boolean = false,
 ): Promise<BridgeResult> {
   const { ethers } = await import("ethers");
 
-  const srcRpc = RPC_URLS[srcChain] ?? RPC_URLS.ethereum;
+  const srcRpc = RPC_URLS[srcChain] ?? RPC_URLS.arbitrum;
   const srcProvider = new ethers.JsonRpcProvider(srcRpc);
   const srcWallet = new ethers.Wallet(signerKey, srcProvider);
 
@@ -1052,71 +1157,29 @@ async function executeCctpEvmToEvm(
     await approveTx.wait();
   }
 
-  // Step 2: Get relay fee — maxFee > 0 enables Circle auto-relay (no receiveMessage needed)
-  const { maxFee } = await getCctpRelayFee(srcDomain, dstDomain, 2000);
+  // Step 2: Get fee (with forwarding — Circle handles dst mint)
+  const finality = fast ? 1000 : 2000;
+  const { maxFee } = await getCctpRelayFee(srcDomain, dstDomain, finality, true, amountUsdc);
 
-  // Step 3: depositForBurn (V2: 7-parameter signature)
+  // Step 3: depositForBurnWithHook + Forwarding Service
+  // Circle Forwarding: include forward hook data → Circle broadcasts receiveMessage on dst.
+  // No manual relay needed. No dst chain gas needed.
   const mintRecipient = ethers.zeroPadValue(recipientAddress, 32);
-  const destinationCaller = ethers.ZeroHash; // permissionless relay
-  const minFinalityThreshold = 2000; // finalized
+  const destinationCaller = ethers.ZeroHash; // must be zero for forwarding
   const tokenMessenger = new ethers.Contract(tokenMessengerAddr, [
-    "function depositForBurn(uint256 amount, uint32 destinationDomain, bytes32 mintRecipient, address burnToken, bytes32 destinationCaller, uint256 maxFee, uint32 minFinalityThreshold) returns (uint64 nonce)",
+    "function depositForBurnWithHook(uint256 amount, uint32 destinationDomain, bytes32 mintRecipient, address burnToken, bytes32 destinationCaller, uint256 maxFee, uint32 minFinalityThreshold, bytes hookData) returns (uint64 nonce)",
   ], srcWallet);
 
-  const depositTx = await tokenMessenger.depositForBurn(
+  const depositTx = await tokenMessenger.depositForBurnWithHook(
     amountRaw, dstDomain, mintRecipient, usdcAddr,
-    destinationCaller, maxFee, minFinalityThreshold,
+    destinationCaller, maxFee, finality, CCTP_FORWARD_HOOK_DATA,
   );
   const receipt = await depositTx.wait();
   const txHash = receipt.hash;
+  const feeUsdc = Number(maxFee) / 1e6;
+  const providerLabel = fast ? "cctp (fast+forward)" : "cctp (forward)";
 
-  // Step 4: Poll attestation, then call receiveMessage on destination chain.
-  // Standard finality (2000): Circle auto-relay does NOT work (minimumFee=0 = no relayer).
-  // Fast finality (1000): auto-relay works but costs $1-1.3 per transfer.
-  // For standard, we must call receiveMessage ourselves after attestation completes.
-  const attestationUrl = `https://iris-api.circle.com/v2/messages/${srcDomain}?transactionHash=${txHash}`;
-  let messageBytes = "";
-  let attestationBytes = "";
-
-  // Poll for attestation (up to ~15 min, every 15s)
-  for (let i = 0; i < 60; i++) {
-    await new Promise(r => setTimeout(r, 15000));
-    try {
-      const res = await fetch(attestationUrl);
-      if (res.ok) {
-        const body = await res.json() as { messages?: Array<{ status: string; attestation: string; message: string }> };
-        const msg = body.messages?.[0];
-        if (msg?.status === "complete" && msg.attestation && msg.attestation !== "PENDING") {
-          messageBytes = msg.message;
-          attestationBytes = msg.attestation;
-          break;
-        }
-      }
-    } catch { /* retry */ }
-  }
-
-  if (!messageBytes) {
-    // Attestation not ready within timeout — return TX hash, user can relay later
-    return { provider: "cctp", txHash, srcChain, dstChain, amountIn: amountUsdc, amountOut: amountUsdc - Number(maxFee) / 1e6 };
-  }
-
-  // Call receiveMessage immediately — no need to wait for auto-relay
-  try {
-    const dstRpc = RPC_URLS[dstChain];
-    const dstProvider = new ethers.JsonRpcProvider(dstRpc);
-    const dstWallet = new ethers.Wallet(signerKey, dstProvider);
-    const messageTransmitter = new ethers.Contract(
-      CCTP_MESSAGE_TRANSMITTER[dstChain],
-      ["function receiveMessage(bytes message, bytes attestation) returns (bool success)"],
-      dstWallet,
-    );
-    const relayTx = await messageTransmitter.receiveMessage(messageBytes, attestationBytes);
-    await relayTx.wait();
-  } catch {
-    // May fail if already relayed — that's fine
-  }
-
-  return { provider: "cctp", txHash, srcChain, dstChain, amountIn: amountUsdc, amountOut: amountUsdc - Number(maxFee) / 1e6 };
+  return { provider: providerLabel, txHash, srcChain, dstChain, amountIn: amountUsdc, amountOut: amountUsdc - feeUsdc };
 }
 
 // ── CCTP: Solana → EVM ──
@@ -1126,7 +1189,8 @@ async function executeCctpSolanaToEvm(
   amountUsdc: number,
   signerKey: string,
   recipientAddress: string,
-  _dstSignerKey?: string, // Deprecated: auto-relay handles receiveMessage
+  _dstSignerKey?: string, // EVM key for manual receiveMessage (standard finality only)
+  fast: boolean = false,
 ): Promise<BridgeResult> {
   const { Connection, PublicKey, Keypair, TransactionMessage, VersionedTransaction, SystemProgram } = await import("@solana/web3.js");
   const bs58 = await import("bs58");
@@ -1201,7 +1265,8 @@ async function executeCctpSolanaToEvm(
   );
 
   // Build instruction data: Anchor discriminator + V2 params
-  const discriminator = createHash("sha256").update("global:deposit_for_burn").digest().subarray(0, 8);
+  // Use deposit_for_burn_with_hook for Forwarding Service (Circle handles dst mint)
+  const discriminator = createHash("sha256").update("global:deposit_for_burn_with_hook").digest().subarray(0, 8);
 
   const amountBuf = Buffer.alloc(8);
   amountBuf.writeBigUInt64LE(BigInt(Math.round(amountUsdc * 1e6)));
@@ -1215,21 +1280,27 @@ async function executeCctpSolanaToEvm(
   const addrBytes = Buffer.from(recipientAddress.replace("0x", ""), "hex");
   addrBytes.copy(recipientBytes, 32 - addrBytes.length); // left-pad
 
-  // destinationCaller: all zeros (permissionless relay)
+  // destinationCaller: all zeros (required for forwarding)
   const destinationCaller = Buffer.alloc(32);
 
-  // maxFee > 0 enables Circle auto-relay (no manual receiveMessage needed)
-  const { maxFee: relayFee } = await getCctpRelayFee(CCTP_DOMAINS.solana, dstDomain, 2000);
+  const finality = fast ? 1000 : 2000;
+  const { maxFee: relayFee } = await getCctpRelayFee(CCTP_DOMAINS.solana, dstDomain, finality, true, amountUsdc);
   const maxFeeBuf = Buffer.alloc(8);
   maxFeeBuf.writeBigUInt64LE(relayFee);
 
-  // minFinalityThreshold: 2000 (finalized)
   const minFinalityBuf = Buffer.alloc(4);
-  minFinalityBuf.writeUInt32LE(2000);
+  minFinalityBuf.writeUInt32LE(finality);
+
+  // Forward hook data: "cctp-forward" magic bytes + version(0) + empty data length(0)
+  const hookData = Buffer.from(CCTP_FORWARD_HOOK_DATA.replace("0x", ""), "hex");
+  // Borsh-encode hook data as Vec<u8>: 4-byte LE length prefix + data
+  const hookLenBuf = Buffer.alloc(4);
+  hookLenBuf.writeUInt32LE(hookData.length);
 
   const data = Buffer.concat([
     discriminator, amountBuf, domainBuf, recipientBytes,
     destinationCaller, maxFeeBuf, minFinalityBuf,
+    hookLenBuf, hookData,
   ]);
 
   const instruction = {
@@ -1274,59 +1345,15 @@ async function executeCctpSolanaToEvm(
   await connection.confirmTransaction(signature, "confirmed");
 
   const feeUsdc = Number(relayFee) / 1e6;
+  const providerLabel = fast ? "cctp (fast+forward)" : "cctp (forward)";
 
-  // Step 5: Wait for attestation + manual receiveMessage fallback if auto-relay fails
-  if (dstChain !== "solana" && _dstSignerKey) {
-    const solanaDomain = CCTP_DOMAINS.solana;
-    const attestationUrl = `https://iris-api.circle.com/v2/messages/${solanaDomain}?transactionHash=${signature}`;
-    let messageBytes = "";
-    let attestationBytes = "";
-
-    for (let i = 0; i < 40; i++) {
-      await new Promise(r => setTimeout(r, 15000));
-      try {
-        const res = await fetch(attestationUrl);
-        if (res.ok) {
-          const body = await res.json() as { messages?: Array<{ status: string; attestation: string; message: string }> };
-          const msg = body.messages?.[0];
-          if (msg?.status === "complete" && msg.attestation && msg.attestation !== "PENDING") {
-            messageBytes = msg.message;
-            attestationBytes = msg.attestation;
-            break;
-          }
-        }
-      } catch { /* retry */ }
-    }
-
-    if (messageBytes && attestationBytes) {
-      // Call receiveMessage immediately on destination EVM chain
-      try {
-        const { ethers } = await import("ethers");
-        const dstRpc = RPC_URLS[dstChain];
-        const dstProvider = new ethers.JsonRpcProvider(dstRpc);
-        const dstWallet = new ethers.Wallet(_dstSignerKey, dstProvider);
-        const mt = new ethers.Contract(
-          CCTP_MESSAGE_TRANSMITTER[dstChain],
-          ["function receiveMessage(bytes message, bytes attestation) returns (bool success)"],
-          dstWallet,
-        );
-        const relayTx = await mt.receiveMessage(messageBytes, attestationBytes);
-        await relayTx.wait();
-      } catch { /* auto-relay may have already delivered */ }
-    }
-  }
-
-  return {
-    provider: "cctp",
-    txHash: signature,
-    srcChain: "solana",
-    dstChain,
-    amountIn: amountUsdc,
-    amountOut: amountUsdc - feeUsdc,
-  };
+  // Forwarding Service: Circle handles dst chain mint — no manual relay needed.
+  return { provider: providerLabel, txHash: signature, srcChain: "solana", dstChain, amountIn: amountUsdc, amountOut: amountUsdc - feeUsdc };
 }
 
 // ── CCTP: EVM → Solana ──
+// NOTE: Circle Forwarding Service does NOT support Solana as destination.
+// Must use depositForBurn + manual receiveMessage (or fast finality for auto-relay).
 
 async function executeCctpEvmToSolana(
   srcChain: string,
@@ -1334,10 +1361,11 @@ async function executeCctpEvmToSolana(
   signerKey: string,
   recipientAddress: string, // Solana base58 pubkey
   solanaPayerKey?: string, // Solana private key for receiveMessage relay
+  fast: boolean = false,
 ): Promise<BridgeResult> {
   const { ethers } = await import("ethers");
 
-  const srcRpc = RPC_URLS[srcChain] ?? RPC_URLS.ethereum;
+  const srcRpc = RPC_URLS[srcChain] ?? RPC_URLS.arbitrum;
   const srcProvider = new ethers.JsonRpcProvider(srcRpc);
   const srcWallet = new ethers.Wallet(signerKey, srcProvider);
 
@@ -1367,12 +1395,12 @@ async function executeCctpEvmToSolana(
     await approveTx.wait();
   }
 
-  // Step 2: Get relay fee for auto-relay
+  // Step 2: Get relay fee (no forwarding — Solana dst not supported)
+  const finality = fast ? 1000 : 2000;
   const srcDomain = CCTP_DOMAINS[srcChain];
-  const { maxFee: relayFee, feeUsdc } = await getCctpRelayFee(srcDomain!, solanaDomain, 2000);
+  const { maxFee: relayFee, feeUsdc } = await getCctpRelayFee(srcDomain!, solanaDomain, finality, false, amountUsdc);
 
   // Step 3: depositForBurn — mintRecipient is the Solana ATA for the recipient
-  // For Solana CCTP, mintRecipient must be the user's USDC ATA (not the wallet pubkey)
   const { PublicKey } = await import("@solana/web3.js");
   const recipientPubkey = new PublicKey(recipientAddress);
   const usdcMint = new PublicKey(USDC_MINT_SOLANA);
@@ -1388,27 +1416,29 @@ async function executeCctpEvmToSolana(
   const mintRecipient = "0x" + Buffer.from(recipientAta.toBytes()).toString("hex");
 
   const destinationCaller = ethers.ZeroHash; // permissionless relay
-  const minFinalityThreshold = 2000; // finalized
   const tokenMessenger = new ethers.Contract(tokenMessengerAddr, [
     "function depositForBurn(uint256 amount, uint32 destinationDomain, bytes32 mintRecipient, address burnToken, bytes32 destinationCaller, uint256 maxFee, uint32 minFinalityThreshold) returns (uint64 nonce)",
   ], srcWallet);
 
   const depositTx = await tokenMessenger.depositForBurn(
     amountRaw, solanaDomain, mintRecipient, usdcAddr,
-    destinationCaller, relayFee, minFinalityThreshold,
+    destinationCaller, relayFee, finality,
   );
   const receipt = await depositTx.wait();
   const txHash = receipt.hash;
 
-  // Step 4: Poll attestation + call Solana receiveMessage
-  // Auto-relay does NOT work for Solana destinations (standard finality).
-  // We must poll attestation and call receiveMessage ourselves.
+  // Fast finality (1000): Circle auto-relays — done.
+  if (fast) {
+    return { provider: "cctp (fast)", txHash, srcChain, dstChain: "solana", amountIn: amountUsdc, amountOut: amountUsdc - feeUsdc };
+  }
+
+  // Standard finality (2000): poll attestation + manual Solana receiveMessage
   if (solanaPayerKey) {
     const attestationUrl = `https://iris-api.circle.com/v2/messages/${srcDomain}?transactionHash=${txHash}`;
     let messageBytes = "";
     let attestationBytes = "";
 
-    for (let i = 0; i < 60; i++) {
+    for (let i = 0; i < 80; i++) {
       await new Promise(r => setTimeout(r, 15000));
       try {
         const res = await fetch(attestationUrl);
@@ -1427,16 +1457,8 @@ async function executeCctpEvmToSolana(
     if (messageBytes && attestationBytes) {
       try {
         const receiveSig = await executeSolanaReceiveMessage(messageBytes, attestationBytes, recipientAddress, solanaPayerKey);
-        return {
-          provider: "cctp" as const,
-          txHash,
-          receiveTxHash: receiveSig,
-          srcChain,
-          dstChain: "solana",
-          amountIn: amountUsdc,
-          amountOut: amountUsdc - feeUsdc,
-        };
-      } catch { /* may fail if already relayed — continue without receiveTxHash */ }
+        return { provider: "cctp", txHash, receiveTxHash: receiveSig, srcChain, dstChain: "solana", amountIn: amountUsdc, amountOut: amountUsdc - feeUsdc };
+      } catch { /* may fail if already relayed */ }
     }
   }
 
@@ -1662,15 +1684,8 @@ const RELAY_API = "https://api.relay.link";
 // Relay chain IDs (same as standard EVM chain IDs, Solana = 792703809)
 const RELAY_CHAIN_IDS: Record<string, number> = {
   solana: 792703809,
-  ethereum: 1,
   arbitrum: 42161,
   base: 8453,
-  optimism: 10,
-  avalanche: 43114,
-  polygon: 137,
-  linea: 59144,
-  bnb: 56,
-  hyperevm: 999,  // Relay uses custom ID for Hyperliquid
 };
 
 export async function getRelayQuote(
@@ -1850,8 +1865,9 @@ export async function executeBestBridge(
   signerKey: string,
   senderAddress: string,
   recipientAddress: string,
-  dstSignerKey?: string, // Optional EVM key for auto receiveMessage (Solana→EVM)
+  dstSignerKey?: string, // Optional EVM key for manual receiveMessage (standard finality)
   provider?: "cctp" | "relay" | "debridge",
+  fast: boolean = false,
 ): Promise<BridgeResult> {
   let quote: BridgeQuote;
 
@@ -1862,11 +1878,14 @@ export async function executeBestBridge(
     if (!match) throw new Error(`Provider "${provider}" not available for ${srcChain} → ${dstChain}`);
     quote = match;
   } else {
-    quote = await getBestQuote(srcChain, dstChain, amountUsdc, senderAddress, recipientAddress);
+    // Default: prefer deBridge DLN (fastest, ~2s), fallback to best available
+    const quotes = await getAllQuotes(srcChain, dstChain, amountUsdc, senderAddress, recipientAddress);
+    if (quotes.length === 0) throw new Error(`No bridge available for ${srcChain} → ${dstChain}`);
+    quote = quotes.find(q => q.provider === "debridge") ?? quotes[0];
   }
 
   if (quote.provider === "cctp") {
-    return executeCctpBridge(srcChain, dstChain, amountUsdc, signerKey, recipientAddress, dstSignerKey);
+    return executeCctpBridge(srcChain, dstChain, amountUsdc, signerKey, recipientAddress, dstSignerKey, fast);
   }
 
   if (quote.provider === "relay") {

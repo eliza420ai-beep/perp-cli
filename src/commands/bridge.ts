@@ -9,6 +9,7 @@ import {
   getBestQuote,
   getAllQuotes,
   checkDebridgeStatus,
+  checkBridgeGasBalance,
   CHAIN_IDS,
   USDC_ADDRESSES,
   EXCHANGE_TO_CHAIN,
@@ -53,7 +54,7 @@ export function registerBridgeCommands(
   bridge
     .command("quote")
     .description("Get bridge quotes from all providers")
-    .requiredOption("--from <chain>", "Source chain (solana, arbitrum, ethereum, base)")
+    .requiredOption("--from <chain>", "Source chain (solana, arbitrum, base)")
     .requiredOption("--to <chain>", "Destination chain")
     .requiredOption("--amount <amount>", "USDC amount")
     .option("--sender <address>", "Source address")
@@ -130,10 +131,11 @@ export function registerBridgeCommands(
     .option("--sender <address>", "Source address (auto-detected from key)")
     .option("--recipient <address>", "Destination address")
     .option("--provider <name>", "Force provider: cctp, relay, debridge (default: cheapest)")
+    .option("--fast", "Use fast finality (~1-2 min, $1-1.3 fee, auto-relay). Default: standard (~13-20 min, $0.01, manual relay)")
     .option("--dry-run", "Show quotes without executing")
     .action(async (opts: {
       from: string; to: string; amount: string;
-      sender?: string; recipient?: string; provider?: string; dryRun?: boolean;
+      sender?: string; recipient?: string; provider?: string; fast?: boolean; dryRun?: boolean;
     }) => {
       const srcChain = opts.from.toLowerCase();
       const dstChain = opts.to.toLowerCase();
@@ -158,7 +160,7 @@ export function registerBridgeCommands(
         senderAddress = opts.sender ?? keypair.publicKey.toBase58();
         signerKey = pk;
       } else {
-        const exchange = srcChain === "arbitrum" ? "hyperliquid" : "lighter";
+        const exchange = "hyperliquid" as const;
         const pk = await loadPrivateKey(exchange);
         const { ethers } = await import("ethers");
         const wallet = new ethers.Wallet(pk);
@@ -176,7 +178,7 @@ export function registerBridgeCommands(
         recipientAddress = keypair.publicKey.toBase58();
         dstSignerKey = pk;
       } else {
-        const exchange = dstChain === "arbitrum" ? "hyperliquid" : "lighter";
+        const exchange = "hyperliquid" as const;
         const pk = await loadPrivateKey(exchange);
         const { ethers } = await import("ethers");
         recipientAddress = new ethers.Wallet(pk).address;
@@ -239,13 +241,28 @@ export function registerBridgeCommands(
         return;
       }
 
+      // Gas balance preflight check
+      const needsDstGas = !selectedQuote.gasIncluded;
+      const gasCheck = await checkBridgeGasBalance(srcChain, senderAddress, dstChain, recipientAddress, needsDstGas);
+      if (!gasCheck.ok) {
+        const msg = gasCheck.errors.map(e => `  ✗ ${e}`).join("\n");
+        if (isJson()) return printJson({ ok: false, error: "Insufficient gas", details: gasCheck.errors });
+        console.log(chalk.red("\n  Insufficient gas for bridge:\n"));
+        console.log(chalk.red(msg));
+        if (needsDstGas) {
+          console.log(chalk.yellow("\n  Tip: use --fast to skip destination gas (Circle auto-relays)\n"));
+        }
+        process.exitCode = 1;
+        return;
+      }
+
       const providerName = PROVIDER_NAMES[selectedQuote.provider] ?? selectedQuote.provider;
       if (!isJson()) console.log(chalk.yellow(`  Executing via ${providerName}...\n`));
 
       let result: Awaited<ReturnType<typeof executeBestBridge>>;
       try {
-        result = await executeBestBridge(srcChain, dstChain, amount, signerKey, senderAddress, recipientAddress, dstSignerKey, chosenProvider);
-        logExecution({ type: "bridge", exchange: "bridge", symbol: "USDC", side: `${srcChain}->${dstChain}`, size: String(amount), status: "success", dryRun: false, meta: { provider: result.provider, txHash: result.txHash } });
+        result = await executeBestBridge(srcChain, dstChain, amount, signerKey, senderAddress, recipientAddress, dstSignerKey, chosenProvider, !!opts.fast);
+        logExecution({ type: "bridge", exchange: "bridge", symbol: "USDC", side: `${srcChain}->${dstChain}`, size: String(amount), status: "success", dryRun: false, meta: { provider: result.provider, txHash: result.txHash, fast: !!opts.fast } });
       } catch (err) {
         logExecution({ type: "bridge", exchange: "bridge", symbol: "USDC", side: `${srcChain}->${dstChain}`, size: String(amount), status: "failed", dryRun: false, error: err instanceof Error ? err.message : String(err) });
         throw err;
@@ -271,8 +288,9 @@ export function registerBridgeCommands(
     .requiredOption("--to <exchange>", "Destination exchange")
     .requiredOption("--amount <amount>", "USDC amount")
     .option("--provider <name>", "Force provider: cctp, relay, debridge (default: cheapest)")
+    .option("--fast", "Use fast finality (~1-2 min, $1-1.3 fee, auto-relay)")
     .option("--dry-run", "Show quotes without executing")
-    .action(async (opts: { from: string; to: string; amount: string; provider?: string; dryRun?: boolean }) => {
+    .action(async (opts: { from: string; to: string; amount: string; provider?: string; fast?: boolean; dryRun?: boolean }) => {
       const srcExchange = opts.from.toLowerCase();
       const dstExchange = opts.to.toLowerCase();
       const srcChain = EXCHANGE_TO_CHAIN[srcExchange];
@@ -368,13 +386,28 @@ export function registerBridgeCommands(
         return;
       }
 
+      // Gas balance preflight check
+      const needsDstGas = !selectedQuote.gasIncluded;
+      const gasCheck = await checkBridgeGasBalance(srcChain, senderAddress, dstChain, recipientAddress, needsDstGas);
+      if (!gasCheck.ok) {
+        const msg = gasCheck.errors.map(e => `  ✗ ${e}`).join("\n");
+        if (isJson()) return printJson({ ok: false, error: "Insufficient gas", details: gasCheck.errors });
+        console.log(chalk.red("\n  Insufficient gas for bridge:\n"));
+        console.log(chalk.red(msg));
+        if (needsDstGas) {
+          console.log(chalk.yellow("\n  Tip: use --fast to skip destination gas (Circle auto-relays)\n"));
+        }
+        process.exitCode = 1;
+        return;
+      }
+
       const providerName = PROVIDER_NAMES[selectedQuote.provider] ?? selectedQuote.provider;
       if (!isJson()) console.log(chalk.yellow(`  Executing via ${providerName}...\n`));
 
       let result: Awaited<ReturnType<typeof executeBestBridge>>;
       try {
-        result = await executeBestBridge(srcChain, dstChain, amount, signerKey, senderAddress, recipientAddress, dstSignerKey, chosenProvider);
-        logExecution({ type: "bridge", exchange: "bridge", symbol: "USDC", side: `${srcExchange}->${dstExchange}`, size: String(amount), status: "success", dryRun: false, meta: { provider: result.provider, txHash: result.txHash } });
+        result = await executeBestBridge(srcChain, dstChain, amount, signerKey, senderAddress, recipientAddress, dstSignerKey, chosenProvider, !!opts.fast);
+        logExecution({ type: "bridge", exchange: "bridge", symbol: "USDC", side: `${srcExchange}->${dstExchange}`, size: String(amount), status: "success", dryRun: false, meta: { provider: result.provider, txHash: result.txHash, fast: !!opts.fast } });
       } catch (err) {
         logExecution({ type: "bridge", exchange: "bridge", symbol: "USDC", side: `${srcExchange}->${dstExchange}`, size: String(amount), status: "failed", dryRun: false, error: err instanceof Error ? err.message : String(err) });
         throw err;
