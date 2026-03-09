@@ -7,6 +7,7 @@ import {
   executeDebridgeBridge,
   executeBestBridge,
   getBestQuote,
+  getAllQuotes,
   checkDebridgeStatus,
   CHAIN_IDS,
   USDC_ADDRESSES,
@@ -51,7 +52,7 @@ export function registerBridgeCommands(
 
   bridge
     .command("quote")
-    .description("Get a bridge quote for USDC transfer")
+    .description("Get bridge quotes from all providers")
     .requiredOption("--from <chain>", "Source chain (solana, arbitrum, ethereum, base)")
     .requiredOption("--to <chain>", "Destination chain")
     .requiredOption("--amount <amount>", "USDC amount")
@@ -65,22 +66,44 @@ export function registerBridgeCommands(
       const dstChain = opts.to.toLowerCase();
       const amount = parseFloat(opts.amount);
 
-      if (!isJson()) console.log(chalk.cyan(`\n  Getting bridge quote: $${amount} USDC ${srcChain} → ${dstChain}...\n`));
+      if (!isJson()) console.log(chalk.cyan(`\n  Fetching quotes: $${amount} USDC ${srcChain} → ${dstChain}...\n`));
 
-      const quote = await getBestQuote(
+      const quotes = await getAllQuotes(
         srcChain, dstChain, amount,
         opts.sender ?? "0x0000000000000000000000000000000000000000",
         opts.recipient ?? "0x0000000000000000000000000000000000000000",
       );
 
-      if (isJson()) return printJson(jsonOk(quote));
+      if (isJson()) return printJson(jsonOk({ quotes }));
 
-      console.log(chalk.cyan.bold(`  ${quote.provider === "cctp" ? "Circle CCTP" : "deBridge DLN"} Quote\n`));
-      console.log(`  Send:     $${formatUsd(quote.amountIn)} USDC on ${srcChain}`);
-      console.log(`  Receive:  $${formatUsd(quote.amountOut)} USDC on ${dstChain}`);
-      console.log(`  Fee:      $${formatUsd(quote.fee)} (${((quote.fee / quote.amountIn) * 100).toFixed(2)}%)`);
-      console.log(`  ETA:      ~${quote.estimatedTime}s`);
-      console.log(chalk.gray(`\n  Use 'perp bridge send --from ${srcChain} --to ${dstChain} --amount ${opts.amount}' to execute.\n`));
+      if (quotes.length === 0) {
+        console.log(chalk.red("  No providers available for this route.\n"));
+        return;
+      }
+
+      const PROVIDER_NAMES: Record<string, string> = {
+        cctp: "Circle CCTP",
+        relay: "Relay",
+        debridge: "deBridge DLN",
+      };
+
+      const rows = quotes.map((q, i) => {
+        const tag = i === 0 ? chalk.green(" ★ BEST") : "";
+        const name = PROVIDER_NAMES[q.provider] ?? q.provider;
+        const feeStr = q.fee <= 0 ? chalk.green("FREE") : `$${formatUsd(q.fee)}`;
+        const pct = ((q.fee / q.amountIn) * 100).toFixed(2);
+        return [
+          (i === 0 ? chalk.green.bold(name) : chalk.white(name)) + tag,
+          `$${formatUsd(q.amountOut)}`,
+          `${feeStr} (${pct}%)`,
+          `~${q.estimatedTime}s`,
+        ];
+      });
+
+      console.log(chalk.cyan.bold(`  Bridge Quotes: $${formatUsd(amount)} USDC ${srcChain} → ${dstChain}\n`));
+      console.log(makeTable(["Provider", "Receive", "Fee", "ETA"], rows));
+      console.log(chalk.gray(`  Execute with: perp bridge send --from ${srcChain} --to ${dstChain} --amount ${opts.amount}`));
+      console.log(chalk.gray(`  Pick provider: --provider cctp|relay|debridge\n`));
     });
 
   // ── bridge send ──
@@ -93,15 +116,21 @@ export function registerBridgeCommands(
     .requiredOption("--amount <amount>", "USDC amount")
     .option("--sender <address>", "Source address (auto-detected from key)")
     .option("--recipient <address>", "Destination address")
-    .option("--dry-run", "Show quote without executing")
+    .option("--provider <name>", "Force provider: cctp, relay, debridge (default: cheapest)")
+    .option("--dry-run", "Show quotes without executing")
     .action(async (opts: {
       from: string; to: string; amount: string;
-      sender?: string; recipient?: string; dryRun?: boolean;
+      sender?: string; recipient?: string; provider?: string; dryRun?: boolean;
     }) => {
       const srcChain = opts.from.toLowerCase();
       const dstChain = opts.to.toLowerCase();
       const amount = parseFloat(opts.amount);
       if (isNaN(amount) || amount <= 0) throw new Error("Invalid amount");
+
+      const chosenProvider = opts.provider?.toLowerCase() as "cctp" | "relay" | "debridge" | undefined;
+      if (chosenProvider && !["cctp", "relay", "debridge"].includes(chosenProvider)) {
+        throw new Error(`Invalid provider: ${opts.provider}. Use cctp, relay, or debridge.`);
+      }
 
       // Load the appropriate private key
       const { loadPrivateKey, parseSolanaKeypair } = await import("../config.js");
@@ -116,7 +145,6 @@ export function registerBridgeCommands(
         senderAddress = opts.sender ?? keypair.publicKey.toBase58();
         signerKey = pk;
       } else {
-        // Determine which exchange key to use based on chain
         const exchange = srcChain === "arbitrum" ? "hyperliquid" : "lighter";
         const pk = await loadPrivateKey(exchange);
         const { ethers } = await import("ethers");
@@ -133,39 +161,70 @@ export function registerBridgeCommands(
         const pk = await loadPrivateKey("pacifica");
         const keypair = parseSolanaKeypair(pk);
         recipientAddress = keypair.publicKey.toBase58();
-        dstSignerKey = pk; // For Solana receiveMessage relay
+        dstSignerKey = pk;
       } else {
         const exchange = dstChain === "arbitrum" ? "hyperliquid" : "lighter";
         const pk = await loadPrivateKey(exchange);
         const { ethers } = await import("ethers");
         recipientAddress = new ethers.Wallet(pk).address;
-        dstSignerKey = pk; // For auto receiveMessage on destination EVM
+        dstSignerKey = pk;
       }
 
-      // Get best quote (CCTP preferred, deBridge fallback)
+      // Fetch all quotes
       if (!isJson()) console.log(chalk.cyan(`\n  Bridge: $${amount} USDC ${srcChain} → ${dstChain}\n`));
-      const quote = await getBestQuote(srcChain, dstChain, amount, senderAddress, recipientAddress);
-      const providerName = quote.provider === "cctp" ? "Circle CCTP" : "deBridge DLN";
+      const quotes = await getAllQuotes(srcChain, dstChain, amount, senderAddress, recipientAddress);
+
+      if (quotes.length === 0) throw new Error(`No bridge available for ${srcChain} → ${dstChain}`);
+
+      // Pick the quote to use
+      let selectedQuote: BridgeQuote;
+      if (chosenProvider) {
+        const match = quotes.find(q => q.provider === chosenProvider);
+        if (!match) throw new Error(`Provider "${chosenProvider}" not available for this route`);
+        selectedQuote = match;
+      } else {
+        selectedQuote = quotes[0]; // best (sorted by amountOut)
+      }
+
+      const PROVIDER_NAMES: Record<string, string> = {
+        cctp: "Circle CCTP",
+        relay: "Relay",
+        debridge: "deBridge DLN",
+      };
 
       if (!isJson()) {
-        console.log(`  Provider: ${providerName}`);
-        console.log(`  Send:     $${formatUsd(quote.amountIn)} USDC`);
-        console.log(`  Receive:  ~$${formatUsd(quote.amountOut)} USDC`);
-        console.log(`  Fee:      $${formatUsd(quote.fee)}`);
+        // Show comparison table
+        const rows = quotes.map((q) => {
+          const name = PROVIDER_NAMES[q.provider] ?? q.provider;
+          const selected = q.provider === selectedQuote.provider;
+          const feeStr = q.fee <= 0 ? chalk.green("FREE") : `$${formatUsd(q.fee)}`;
+          const pct = ((q.fee / q.amountIn) * 100).toFixed(2);
+          const tag = selected ? chalk.green(" ← selected") : "";
+          return [
+            (selected ? chalk.green.bold(name) : chalk.white(name)) + tag,
+            `$${formatUsd(q.amountOut)}`,
+            `${feeStr} (${pct}%)`,
+            `~${q.estimatedTime}s`,
+          ];
+        });
+        console.log(makeTable(["Provider", "Receive", "Fee", "ETA"], rows));
+
         console.log(`  From:     ${senderAddress}`);
-        console.log(`  To:       ${recipientAddress}`);
-        console.log(`  ETA:      ~${quote.estimatedTime}s\n`);
+        console.log(`  To:       ${recipientAddress}\n`);
       }
 
       if (opts.dryRun) {
-        if (!isJson()) console.log(chalk.yellow("  [DRY RUN] Transaction not executed.\n"));
+        if (isJson()) return printJson(jsonOk({ quotes, selected: selectedQuote.provider }));
+        console.log(chalk.yellow("  [DRY RUN] Transaction not executed.\n"));
         return;
       }
 
+      const providerName = PROVIDER_NAMES[selectedQuote.provider] ?? selectedQuote.provider;
       if (!isJson()) console.log(chalk.yellow(`  Executing via ${providerName}...\n`));
+
       let result: Awaited<ReturnType<typeof executeBestBridge>>;
       try {
-        result = await executeBestBridge(srcChain, dstChain, amount, signerKey, senderAddress, recipientAddress, dstSignerKey);
+        result = await executeBestBridge(srcChain, dstChain, amount, signerKey, senderAddress, recipientAddress, dstSignerKey, chosenProvider);
         logExecution({ type: "bridge", exchange: "bridge", symbol: "USDC", side: `${srcChain}->${dstChain}`, size: String(amount), status: "success", dryRun: false, meta: { provider: result.provider, txHash: result.txHash } });
       } catch (err) {
         logExecution({ type: "bridge", exchange: "bridge", symbol: "USDC", side: `${srcChain}->${dstChain}`, size: String(amount), status: "failed", dryRun: false, error: err instanceof Error ? err.message : String(err) });
@@ -180,7 +239,7 @@ export function registerBridgeCommands(
       if (result.receiveTxHash) {
         console.log(`  Receive:  ${result.receiveTxHash} (${dstChain})`);
       }
-      console.log(chalk.gray(`\n  Funds arrive in ~${quote.estimatedTime}s on ${dstChain}.\n`));
+      console.log(chalk.gray(`\n  Funds arrive in ~${selectedQuote.estimatedTime}s on ${dstChain}.\n`));
     });
 
   // ── bridge between exchanges (shortcut) ──
@@ -191,8 +250,9 @@ export function registerBridgeCommands(
     .requiredOption("--from <exchange>", "Source exchange (pacifica, hyperliquid, lighter)")
     .requiredOption("--to <exchange>", "Destination exchange")
     .requiredOption("--amount <amount>", "USDC amount")
-    .option("--dry-run", "Show quote without executing")
-    .action(async (opts: { from: string; to: string; amount: string; dryRun?: boolean }) => {
+    .option("--provider <name>", "Force provider: cctp, relay, debridge (default: cheapest)")
+    .option("--dry-run", "Show quotes without executing")
+    .action(async (opts: { from: string; to: string; amount: string; provider?: string; dryRun?: boolean }) => {
       const srcExchange = opts.from.toLowerCase();
       const dstExchange = opts.to.toLowerCase();
       const srcChain = EXCHANGE_TO_CHAIN[srcExchange];
@@ -200,6 +260,11 @@ export function registerBridgeCommands(
       if (!srcChain) throw new Error(`Unknown exchange: ${srcExchange}`);
       if (!dstChain) throw new Error(`Unknown exchange: ${dstExchange}`);
       if (srcChain === dstChain) throw new Error("Same chain — no bridge needed");
+
+      const chosenProvider = opts.provider?.toLowerCase() as "cctp" | "relay" | "debridge" | undefined;
+      if (chosenProvider && !["cctp", "relay", "debridge"].includes(chosenProvider)) {
+        throw new Error(`Invalid provider: ${opts.provider}. Use cctp, relay, or debridge.`);
+      }
 
       const amount = parseFloat(opts.amount);
       if (!isJson()) console.log(chalk.cyan(`\n  Bridge: $${amount} USDC ${srcExchange} (${srcChain}) → ${dstExchange} (${dstChain})\n`));
@@ -227,35 +292,61 @@ export function registerBridgeCommands(
       if (dstChain === "solana") {
         const pk = await loadPrivateKey("pacifica");
         recipientAddress = parseSolanaKeypair(pk).publicKey.toBase58();
-        dstSignerKey = pk; // For Solana receiveMessage relay
+        dstSignerKey = pk;
       } else {
         const pk = await loadPrivateKey(dstExchange as Exchange);
         const { ethers } = await import("ethers");
         recipientAddress = new ethers.Wallet(pk).address;
-        dstSignerKey = pk; // For auto receiveMessage
+        dstSignerKey = pk;
       }
 
-      const quote = await getBestQuote(srcChain, dstChain, amount, senderAddress, recipientAddress);
-      const providerName = quote.provider === "cctp" ? "Circle CCTP" : "deBridge DLN";
+      const quotes = await getAllQuotes(srcChain, dstChain, amount, senderAddress, recipientAddress);
+      if (quotes.length === 0) throw new Error(`No bridge available for ${srcChain} → ${dstChain}`);
+
+      let selectedQuote: BridgeQuote;
+      if (chosenProvider) {
+        const match = quotes.find(q => q.provider === chosenProvider);
+        if (!match) throw new Error(`Provider "${chosenProvider}" not available for this route`);
+        selectedQuote = match;
+      } else {
+        selectedQuote = quotes[0];
+      }
+
+      const PROVIDER_NAMES: Record<string, string> = {
+        cctp: "Circle CCTP",
+        relay: "Relay",
+        debridge: "deBridge DLN",
+      };
 
       if (!isJson()) {
-        console.log(`  Provider: ${providerName}`);
-        console.log(`  Send:     $${formatUsd(quote.amountIn)} USDC from ${srcExchange}`);
-        console.log(`  Receive:  ~$${formatUsd(quote.amountOut)} USDC on ${dstExchange}`);
-        console.log(`  Fee:      $${formatUsd(quote.fee)} (${((quote.fee / quote.amountIn) * 100).toFixed(2)}%)`);
-        console.log(`  ETA:      ~${quote.estimatedTime}s\n`);
+        const rows = quotes.map((q) => {
+          const name = PROVIDER_NAMES[q.provider] ?? q.provider;
+          const selected = q.provider === selectedQuote.provider;
+          const feeStr = q.fee <= 0 ? chalk.green("FREE") : `$${formatUsd(q.fee)}`;
+          const pct = ((q.fee / q.amountIn) * 100).toFixed(2);
+          const tag = selected ? chalk.green(" ← selected") : "";
+          return [
+            (selected ? chalk.green.bold(name) : chalk.white(name)) + tag,
+            `$${formatUsd(q.amountOut)}`,
+            `${feeStr} (${pct}%)`,
+            `~${q.estimatedTime}s`,
+          ];
+        });
+        console.log(makeTable(["Provider", "Receive", "Fee", "ETA"], rows));
       }
 
       if (opts.dryRun) {
-        if (!isJson()) console.log(chalk.yellow("  [DRY RUN] Not executed.\n"));
+        if (isJson()) return printJson(jsonOk({ quotes, selected: selectedQuote.provider }));
+        console.log(chalk.yellow("  [DRY RUN] Not executed.\n"));
         return;
       }
 
+      const providerName = PROVIDER_NAMES[selectedQuote.provider] ?? selectedQuote.provider;
       if (!isJson()) console.log(chalk.yellow(`  Executing via ${providerName}...\n`));
 
       let result: Awaited<ReturnType<typeof executeBestBridge>>;
       try {
-        result = await executeBestBridge(srcChain, dstChain, amount, signerKey, senderAddress, recipientAddress, dstSignerKey);
+        result = await executeBestBridge(srcChain, dstChain, amount, signerKey, senderAddress, recipientAddress, dstSignerKey, chosenProvider);
         logExecution({ type: "bridge", exchange: "bridge", symbol: "USDC", side: `${srcExchange}->${dstExchange}`, size: String(amount), status: "success", dryRun: false, meta: { provider: result.provider, txHash: result.txHash } });
       } catch (err) {
         logExecution({ type: "bridge", exchange: "bridge", symbol: "USDC", side: `${srcExchange}->${dstExchange}`, size: String(amount), status: "failed", dryRun: false, error: err instanceof Error ? err.message : String(err) });

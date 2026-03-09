@@ -1778,22 +1778,19 @@ export async function executeRelayBridge(
  * - CCTP primary ($0 fee) for all routes: Solana↔EVM, EVM↔EVM, →HyperCore
  * - Relay + deBridge DLN in parallel, pick cheapest
  */
-export async function getBestQuote(
+/**
+ * Get quotes from ALL available providers in parallel.
+ * Returns sorted by amountOut (best first).
+ */
+export async function getAllQuotes(
   srcChain: string,
   dstChain: string,
   amountUsdc: number,
   senderAddress: string,
   recipientAddress: string,
-): Promise<BridgeQuote> {
-  // Try CCTP first ($0 fee)
-  try {
-    return await getCctpQuote(srcChain, dstChain, amountUsdc);
-  } catch {
-    // CCTP not available for this route
-  }
-
-  // Try Relay and deBridge in parallel, pick cheapest
+): Promise<BridgeQuote[]> {
   const results = await Promise.allSettled([
+    getCctpQuote(srcChain, dstChain, amountUsdc),
     getRelayQuote(srcChain, dstChain, amountUsdc, senderAddress, recipientAddress),
     getDebridgeQuote(srcChain, dstChain, amountUsdc, senderAddress, recipientAddress),
   ]);
@@ -1803,17 +1800,31 @@ export async function getBestQuote(
     if (r.status === "fulfilled") quotes.push(r.value);
   }
 
+  // Sort by best deal (highest amountOut)
+  quotes.sort((a, b) => b.amountOut - a.amountOut);
+  return quotes;
+}
+
+/**
+ * Get the best quote across all providers.
+ */
+export async function getBestQuote(
+  srcChain: string,
+  dstChain: string,
+  amountUsdc: number,
+  senderAddress: string,
+  recipientAddress: string,
+): Promise<BridgeQuote> {
+  const quotes = await getAllQuotes(srcChain, dstChain, amountUsdc, senderAddress, recipientAddress);
   if (quotes.length === 0) {
     throw new Error(`No bridge available for ${srcChain} → ${dstChain}`);
   }
-
-  // Pick the one with lowest fee (highest amountOut)
-  quotes.sort((a, b) => b.amountOut - a.amountOut);
   return quotes[0];
 }
 
 /**
- * Execute a bridge using the best available provider.
+ * Execute a bridge using the specified or best available provider.
+ * @param provider - Optional: force a specific provider ("cctp" | "relay" | "debridge")
  */
 export async function executeBestBridge(
   srcChain: string,
@@ -1823,8 +1834,19 @@ export async function executeBestBridge(
   senderAddress: string,
   recipientAddress: string,
   dstSignerKey?: string, // Optional EVM key for auto receiveMessage (Solana→EVM)
+  provider?: "cctp" | "relay" | "debridge",
 ): Promise<BridgeResult> {
-  const quote = await getBestQuote(srcChain, dstChain, amountUsdc, senderAddress, recipientAddress);
+  let quote: BridgeQuote;
+
+  if (provider) {
+    // User specified a provider — get that specific quote
+    const quotes = await getAllQuotes(srcChain, dstChain, amountUsdc, senderAddress, recipientAddress);
+    const match = quotes.find(q => q.provider === provider);
+    if (!match) throw new Error(`Provider "${provider}" not available for ${srcChain} → ${dstChain}`);
+    quote = match;
+  } else {
+    quote = await getBestQuote(srcChain, dstChain, amountUsdc, senderAddress, recipientAddress);
+  }
 
   if (quote.provider === "cctp") {
     return executeCctpBridge(srcChain, dstChain, amountUsdc, signerKey, recipientAddress, dstSignerKey);
