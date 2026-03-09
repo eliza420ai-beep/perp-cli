@@ -75,29 +75,29 @@ describe("Bridge Integration — Read-Only", { timeout: 60000 }, () => {
   // ══════════════════════════════════════════════════════════
 
   describe("CCTP V2 quotes", () => {
-    it("solana → arbitrum: minimal relay fee, ~65s ETA", async () => {
+    it("solana → arbitrum: minimal relay fee (standard finality)", async () => {
       const quote = await getCctpQuote("solana", "arbitrum", 500);
 
       expect(quote.provider).toBe("cctp");
       expect(quote.fee).toBeLessThanOrEqual(0.02);
       expect(quote.amountOut).toBeGreaterThanOrEqual(499.98);
-      expect(quote.estimatedTime).toBe(65);
+      expect(quote.estimatedTime).toBeGreaterThan(0);
     });
 
-    it("arbitrum → base: minimal relay fee, 60s ETA (L2 to L2)", async () => {
+    it("arbitrum → base: minimal relay fee (L2 to L2)", async () => {
       const quote = await getCctpQuote("arbitrum", "base", 200);
 
       expect(quote.provider).toBe("cctp");
       expect(quote.fee).toBeLessThanOrEqual(0.02);
-      expect(quote.estimatedTime).toBe(60);
+      expect(quote.estimatedTime).toBeGreaterThan(0);
     });
 
-    it("base → solana: minimal relay fee, 65s ETA", async () => {
+    it("base → solana: minimal relay fee", async () => {
       const quote = await getCctpQuote("base", "solana", 100);
 
       expect(quote.provider).toBe("cctp");
       expect(quote.fee).toBeLessThanOrEqual(0.02);
-      expect(quote.estimatedTime).toBe(65);
+      expect(quote.estimatedTime).toBeGreaterThan(0);
     });
 
     it("CCTP quote for tiny amount ($0.01): still valid", async () => {

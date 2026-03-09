@@ -130,10 +130,11 @@ export function registerBridgeCommands(
     .option("--sender <address>", "Source address (auto-detected from key)")
     .option("--recipient <address>", "Destination address")
     .option("--provider <name>", "Force provider: cctp, relay, debridge (default: cheapest)")
+    .option("--fast", "Use fast finality (~1-2 min, $1-1.3 fee, auto-relay). Default: standard (~13-20 min, $0.01, manual relay)")
     .option("--dry-run", "Show quotes without executing")
     .action(async (opts: {
       from: string; to: string; amount: string;
-      sender?: string; recipient?: string; provider?: string; dryRun?: boolean;
+      sender?: string; recipient?: string; provider?: string; fast?: boolean; dryRun?: boolean;
     }) => {
       const srcChain = opts.from.toLowerCase();
       const dstChain = opts.to.toLowerCase();
@@ -244,8 +245,8 @@ export function registerBridgeCommands(
 
       let result: Awaited<ReturnType<typeof executeBestBridge>>;
       try {
-        result = await executeBestBridge(srcChain, dstChain, amount, signerKey, senderAddress, recipientAddress, dstSignerKey, chosenProvider);
-        logExecution({ type: "bridge", exchange: "bridge", symbol: "USDC", side: `${srcChain}->${dstChain}`, size: String(amount), status: "success", dryRun: false, meta: { provider: result.provider, txHash: result.txHash } });
+        result = await executeBestBridge(srcChain, dstChain, amount, signerKey, senderAddress, recipientAddress, dstSignerKey, chosenProvider, !!opts.fast);
+        logExecution({ type: "bridge", exchange: "bridge", symbol: "USDC", side: `${srcChain}->${dstChain}`, size: String(amount), status: "success", dryRun: false, meta: { provider: result.provider, txHash: result.txHash, fast: !!opts.fast } });
       } catch (err) {
         logExecution({ type: "bridge", exchange: "bridge", symbol: "USDC", side: `${srcChain}->${dstChain}`, size: String(amount), status: "failed", dryRun: false, error: err instanceof Error ? err.message : String(err) });
         throw err;
@@ -271,8 +272,9 @@ export function registerBridgeCommands(
     .requiredOption("--to <exchange>", "Destination exchange")
     .requiredOption("--amount <amount>", "USDC amount")
     .option("--provider <name>", "Force provider: cctp, relay, debridge (default: cheapest)")
+    .option("--fast", "Use fast finality (~1-2 min, $1-1.3 fee, auto-relay)")
     .option("--dry-run", "Show quotes without executing")
-    .action(async (opts: { from: string; to: string; amount: string; provider?: string; dryRun?: boolean }) => {
+    .action(async (opts: { from: string; to: string; amount: string; provider?: string; fast?: boolean; dryRun?: boolean }) => {
       const srcExchange = opts.from.toLowerCase();
       const dstExchange = opts.to.toLowerCase();
       const srcChain = EXCHANGE_TO_CHAIN[srcExchange];
@@ -373,8 +375,8 @@ export function registerBridgeCommands(
 
       let result: Awaited<ReturnType<typeof executeBestBridge>>;
       try {
-        result = await executeBestBridge(srcChain, dstChain, amount, signerKey, senderAddress, recipientAddress, dstSignerKey, chosenProvider);
-        logExecution({ type: "bridge", exchange: "bridge", symbol: "USDC", side: `${srcExchange}->${dstExchange}`, size: String(amount), status: "success", dryRun: false, meta: { provider: result.provider, txHash: result.txHash } });
+        result = await executeBestBridge(srcChain, dstChain, amount, signerKey, senderAddress, recipientAddress, dstSignerKey, chosenProvider, !!opts.fast);
+        logExecution({ type: "bridge", exchange: "bridge", symbol: "USDC", side: `${srcExchange}->${dstExchange}`, size: String(amount), status: "success", dryRun: false, meta: { provider: result.provider, txHash: result.txHash, fast: !!opts.fast } });
       } catch (err) {
         logExecution({ type: "bridge", exchange: "bridge", symbol: "USDC", side: `${srcExchange}->${dstExchange}`, size: String(amount), status: "failed", dryRun: false, error: err instanceof Error ? err.message : String(err) });
         throw err;

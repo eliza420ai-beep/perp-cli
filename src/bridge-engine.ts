@@ -483,11 +483,15 @@ function isCctpSupported(chain: string): boolean {
 
 /**
  * Get a CCTP V2 bridge quote. Supports EVM ↔ EVM, Solana ↔ EVM, and → HyperCore.
+ *
+ * @param fast - If true, use fast finality (1000): ~1-2 min, auto-relay, $1-1.3 fee.
+ *               If false (default), use standard finality (2000): ~13-20 min, manual relay, $0.01 fee.
  */
 export async function getCctpQuote(
   srcChain: string,
   dstChain: string,
   amountUsdc: number,
+  fast: boolean = false,
 ): Promise<BridgeQuote> {
   if (!isCctpSupported(srcChain)) throw new Error(`CCTP not supported on ${srcChain}`);
   if (!isCctpSupported(dstChain)) throw new Error(`CCTP not supported on ${dstChain}`);
@@ -505,7 +509,7 @@ export async function getCctpQuote(
       estimatedTime: 60, // ~1 min with fast finality
       gasIncluded: true,
       gasNote: "HyperCore handles forwarding",
-      raw: { type: "cctp-hypercore-withdraw" },
+      raw: { type: "cctp-hypercore-withdraw", fast },
     };
   }
 
@@ -527,20 +531,23 @@ export async function getCctpQuote(
       estimatedTime,
       gasIncluded: true,
       gasNote: "CctpForwarder auto-deposits to HyperCore",
-      raw: { type: "cctp-hypercore", maxFee: fees.maxFee },
+      raw: { type: "cctp-hypercore", maxFee: fees.maxFee, fast },
     };
   }
 
-  // Standard CCTP V2 with auto-relay
-  const estimatedTime = (srcChain === "solana" || dstChain === "solana") ? 65 : 60;
+  // Standard CCTP V2
+  const finality = fast ? 1000 : 2000;
 
   // Fetch relay fee from Circle API
   const srcDomain = CCTP_DOMAINS[srcChain];
   const dstDomain = CCTP_DOMAINS[dstChain];
-  const { maxFee, feeUsdc } = await getCctpRelayFee(srcDomain!, dstDomain!, 2000);
+  const { maxFee, feeUsdc } = await getCctpRelayFee(srcDomain!, dstDomain!, finality);
 
-  // maxFee > 0 means Circle relayer auto-relays. $0.01 is the minimum incentive.
-  const isAutoRelay = maxFee > 0n;
+  // fast (1000): Circle relayer auto-relays, ~1-2 min, $1-1.3 fee
+  // standard (2000): manual receiveMessage needed, ~13-20 min, $0.01 fee
+  const estimatedTime = fast
+    ? ((srcChain === "solana" || dstChain === "solana") ? 90 : 60)
+    : ((srcChain === "solana" || dstChain === "solana") ? 180 : 900);
 
   return {
     provider: "cctp",
@@ -550,16 +557,19 @@ export async function getCctpQuote(
     amountOut: amountUsdc - feeUsdc,
     fee: feeUsdc,
     estimatedTime,
-    gasIncluded: isAutoRelay,
-    gasNote: isAutoRelay
-      ? `Auto-relay (maxFee $${feeUsdc.toFixed(2)} deducted from USDC)`
-      : "Manual — receiveMessage required on destination (dst gas needed)",
-    raw: { type: "cctp", maxFee: Number(maxFee) },
+    gasIncluded: fast, // fast = Circle auto-relay, standard = manual receiveMessage
+    gasNote: fast
+      ? `Fast auto-relay (maxFee $${feeUsdc.toFixed(2)}, ~1-2 min)`
+      : `Standard relay (maxFee $${feeUsdc.toFixed(2)}, ~13-20 min, manual receiveMessage on dst)`,
+    raw: { type: "cctp", maxFee: Number(maxFee), fast },
   };
 }
 
 /**
  * Execute a CCTP V2 bridge. Routes to the appropriate implementation.
+ *
+ * @param fast - If true, use fast finality (1000): Circle auto-relays, no manual receiveMessage.
+ *               If false (default), use standard finality (2000): cheaper but requires manual relay.
  */
 export async function executeCctpBridge(
   srcChain: string,
@@ -568,6 +578,7 @@ export async function executeCctpBridge(
   signerKey: string,
   recipientAddress: string,
   dstSignerKey?: string, // EVM key for receiveMessage (Solana→EVM) or Solana key for receiveMessage (EVM→Solana)
+  fast: boolean = false,
 ): Promise<BridgeResult> {
   // HyperCore route: depositForBurnWithHook via CctpForwarder
   if (dstChain === "hyperevm") {
@@ -581,12 +592,12 @@ export async function executeCctpBridge(
     return executeCctpHyperCoreToEvm(dstChain, amountUsdc, signerKey, recipientAddress);
   }
   if (srcChain === "solana") {
-    return executeCctpSolanaToEvm(dstChain, amountUsdc, signerKey, recipientAddress, dstSignerKey);
+    return executeCctpSolanaToEvm(dstChain, amountUsdc, signerKey, recipientAddress, dstSignerKey, fast);
   }
   if (dstChain === "solana") {
-    return executeCctpEvmToSolana(srcChain, amountUsdc, signerKey, recipientAddress, dstSignerKey);
+    return executeCctpEvmToSolana(srcChain, amountUsdc, signerKey, recipientAddress, dstSignerKey, fast);
   }
-  return executeCctpEvmToEvm(srcChain, dstChain, amountUsdc, signerKey, recipientAddress);
+  return executeCctpEvmToEvm(srcChain, dstChain, amountUsdc, signerKey, recipientAddress, fast);
 }
 
 // ── CCTP: Solana → HyperCore (depositForBurnWithHook) ──
@@ -969,6 +980,7 @@ async function executeCctpEvmToEvm(
   amountUsdc: number,
   signerKey: string,
   recipientAddress: string,
+  fast: boolean = false,
 ): Promise<BridgeResult> {
   const { ethers } = await import("ethers");
 
@@ -1005,34 +1017,36 @@ async function executeCctpEvmToEvm(
     await approveTx.wait();
   }
 
-  // Step 2: Get relay fee — maxFee > 0 enables Circle auto-relay (no receiveMessage needed)
-  const { maxFee } = await getCctpRelayFee(srcDomain, dstDomain, 2000);
+  // Step 2: Get relay fee
+  const finality = fast ? 1000 : 2000;
+  const { maxFee } = await getCctpRelayFee(srcDomain, dstDomain, finality);
 
   // Step 3: depositForBurn (V2: 7-parameter signature)
   const mintRecipient = ethers.zeroPadValue(recipientAddress, 32);
   const destinationCaller = ethers.ZeroHash; // permissionless relay
-  const minFinalityThreshold = 2000; // finalized
   const tokenMessenger = new ethers.Contract(tokenMessengerAddr, [
     "function depositForBurn(uint256 amount, uint32 destinationDomain, bytes32 mintRecipient, address burnToken, bytes32 destinationCaller, uint256 maxFee, uint32 minFinalityThreshold) returns (uint64 nonce)",
   ], srcWallet);
 
   const depositTx = await tokenMessenger.depositForBurn(
     amountRaw, dstDomain, mintRecipient, usdcAddr,
-    destinationCaller, maxFee, minFinalityThreshold,
+    destinationCaller, maxFee, finality,
   );
   const receipt = await depositTx.wait();
   const txHash = receipt.hash;
 
-  // Step 4: Poll attestation, then call receiveMessage on destination chain.
-  // Standard finality (2000): Circle auto-relay does NOT work (minimumFee=0 = no relayer).
-  // Fast finality (1000): auto-relay works but costs $1-1.3 per transfer.
-  // For standard, we must call receiveMessage ourselves after attestation completes.
+  // Fast finality (1000): Circle auto-relays — done, no manual relay needed.
+  if (fast) {
+    return { provider: "cctp (fast)", txHash, srcChain, dstChain, amountIn: amountUsdc, amountOut: amountUsdc - Number(maxFee) / 1e6 };
+  }
+
+  // Standard finality (2000): poll attestation + manual receiveMessage on dst chain.
   const attestationUrl = `https://iris-api.circle.com/v2/messages/${srcDomain}?transactionHash=${txHash}`;
   let messageBytes = "";
   let attestationBytes = "";
 
-  // Poll for attestation (up to ~15 min, every 15s)
-  for (let i = 0; i < 60; i++) {
+  // Poll for attestation (up to ~20 min, every 15s)
+  for (let i = 0; i < 80; i++) {
     await new Promise(r => setTimeout(r, 15000));
     try {
       const res = await fetch(attestationUrl);
@@ -1053,7 +1067,8 @@ async function executeCctpEvmToEvm(
     return { provider: "cctp", txHash, srcChain, dstChain, amountIn: amountUsdc, amountOut: amountUsdc - Number(maxFee) / 1e6 };
   }
 
-  // Call receiveMessage immediately — no need to wait for auto-relay
+  // Call receiveMessage on destination chain
+  let receiveTxHash: string | undefined;
   try {
     const dstRpc = RPC_URLS[dstChain];
     const dstProvider = new ethers.JsonRpcProvider(dstRpc);
@@ -1064,12 +1079,13 @@ async function executeCctpEvmToEvm(
       dstWallet,
     );
     const relayTx = await messageTransmitter.receiveMessage(messageBytes, attestationBytes);
-    await relayTx.wait();
+    const relayReceipt = await relayTx.wait();
+    receiveTxHash = relayReceipt.hash;
   } catch {
     // May fail if already relayed — that's fine
   }
 
-  return { provider: "cctp", txHash, srcChain, dstChain, amountIn: amountUsdc, amountOut: amountUsdc - Number(maxFee) / 1e6 };
+  return { provider: "cctp", txHash, srcChain, dstChain, amountIn: amountUsdc, amountOut: amountUsdc - Number(maxFee) / 1e6, receiveTxHash };
 }
 
 // ── CCTP: Solana → EVM ──
@@ -1079,7 +1095,8 @@ async function executeCctpSolanaToEvm(
   amountUsdc: number,
   signerKey: string,
   recipientAddress: string,
-  _dstSignerKey?: string, // Deprecated: auto-relay handles receiveMessage
+  _dstSignerKey?: string, // EVM key for manual receiveMessage (standard finality only)
+  fast: boolean = false,
 ): Promise<BridgeResult> {
   const { Connection, PublicKey, Keypair, TransactionMessage, VersionedTransaction, SystemProgram } = await import("@solana/web3.js");
   const bs58 = await import("bs58");
@@ -1171,14 +1188,13 @@ async function executeCctpSolanaToEvm(
   // destinationCaller: all zeros (permissionless relay)
   const destinationCaller = Buffer.alloc(32);
 
-  // maxFee > 0 enables Circle auto-relay (no manual receiveMessage needed)
-  const { maxFee: relayFee } = await getCctpRelayFee(CCTP_DOMAINS.solana, dstDomain, 2000);
+  const finality = fast ? 1000 : 2000;
+  const { maxFee: relayFee } = await getCctpRelayFee(CCTP_DOMAINS.solana, dstDomain, finality);
   const maxFeeBuf = Buffer.alloc(8);
   maxFeeBuf.writeBigUInt64LE(relayFee);
 
-  // minFinalityThreshold: 2000 (finalized)
   const minFinalityBuf = Buffer.alloc(4);
-  minFinalityBuf.writeUInt32LE(2000);
+  minFinalityBuf.writeUInt32LE(finality);
 
   const data = Buffer.concat([
     discriminator, amountBuf, domainBuf, recipientBytes,
@@ -1228,14 +1244,19 @@ async function executeCctpSolanaToEvm(
 
   const feeUsdc = Number(relayFee) / 1e6;
 
-  // Step 5: Wait for attestation + manual receiveMessage fallback if auto-relay fails
+  // Fast finality (1000): Circle auto-relays — done.
+  if (fast) {
+    return { provider: "cctp (fast)", txHash: signature, srcChain: "solana", dstChain, amountIn: amountUsdc, amountOut: amountUsdc - feeUsdc };
+  }
+
+  // Standard finality (2000): poll attestation + manual receiveMessage on dst EVM chain
   if (dstChain !== "solana" && _dstSignerKey) {
     const solanaDomain = CCTP_DOMAINS.solana;
     const attestationUrl = `https://iris-api.circle.com/v2/messages/${solanaDomain}?transactionHash=${signature}`;
     let messageBytes = "";
     let attestationBytes = "";
 
-    for (let i = 0; i < 40; i++) {
+    for (let i = 0; i < 80; i++) {
       await new Promise(r => setTimeout(r, 15000));
       try {
         const res = await fetch(attestationUrl);
@@ -1252,7 +1273,6 @@ async function executeCctpSolanaToEvm(
     }
 
     if (messageBytes && attestationBytes) {
-      // Call receiveMessage immediately on destination EVM chain
       try {
         const { ethers } = await import("ethers");
         const dstRpc = RPC_URLS[dstChain];
@@ -1264,19 +1284,13 @@ async function executeCctpSolanaToEvm(
           dstWallet,
         );
         const relayTx = await mt.receiveMessage(messageBytes, attestationBytes);
-        await relayTx.wait();
-      } catch { /* auto-relay may have already delivered */ }
+        const relayReceipt = await relayTx.wait();
+        return { provider: "cctp", txHash: signature, receiveTxHash: relayReceipt.hash, srcChain: "solana", dstChain, amountIn: amountUsdc, amountOut: amountUsdc - feeUsdc };
+      } catch { /* may fail if already relayed */ }
     }
   }
 
-  return {
-    provider: "cctp",
-    txHash: signature,
-    srcChain: "solana",
-    dstChain,
-    amountIn: amountUsdc,
-    amountOut: amountUsdc - feeUsdc,
-  };
+  return { provider: "cctp", txHash: signature, srcChain: "solana", dstChain, amountIn: amountUsdc, amountOut: amountUsdc - feeUsdc };
 }
 
 // ── CCTP: EVM → Solana ──
@@ -1287,6 +1301,7 @@ async function executeCctpEvmToSolana(
   signerKey: string,
   recipientAddress: string, // Solana base58 pubkey
   solanaPayerKey?: string, // Solana private key for receiveMessage relay
+  fast: boolean = false,
 ): Promise<BridgeResult> {
   const { ethers } = await import("ethers");
 
@@ -1320,12 +1335,12 @@ async function executeCctpEvmToSolana(
     await approveTx.wait();
   }
 
-  // Step 2: Get relay fee for auto-relay
+  // Step 2: Get relay fee
+  const finality = fast ? 1000 : 2000;
   const srcDomain = CCTP_DOMAINS[srcChain];
-  const { maxFee: relayFee, feeUsdc } = await getCctpRelayFee(srcDomain!, solanaDomain, 2000);
+  const { maxFee: relayFee, feeUsdc } = await getCctpRelayFee(srcDomain!, solanaDomain, finality);
 
   // Step 3: depositForBurn — mintRecipient is the Solana ATA for the recipient
-  // For Solana CCTP, mintRecipient must be the user's USDC ATA (not the wallet pubkey)
   const { PublicKey } = await import("@solana/web3.js");
   const recipientPubkey = new PublicKey(recipientAddress);
   const usdcMint = new PublicKey(USDC_MINT_SOLANA);
@@ -1341,27 +1356,29 @@ async function executeCctpEvmToSolana(
   const mintRecipient = "0x" + Buffer.from(recipientAta.toBytes()).toString("hex");
 
   const destinationCaller = ethers.ZeroHash; // permissionless relay
-  const minFinalityThreshold = 2000; // finalized
   const tokenMessenger = new ethers.Contract(tokenMessengerAddr, [
     "function depositForBurn(uint256 amount, uint32 destinationDomain, bytes32 mintRecipient, address burnToken, bytes32 destinationCaller, uint256 maxFee, uint32 minFinalityThreshold) returns (uint64 nonce)",
   ], srcWallet);
 
   const depositTx = await tokenMessenger.depositForBurn(
     amountRaw, solanaDomain, mintRecipient, usdcAddr,
-    destinationCaller, relayFee, minFinalityThreshold,
+    destinationCaller, relayFee, finality,
   );
   const receipt = await depositTx.wait();
   const txHash = receipt.hash;
 
-  // Step 4: Poll attestation + call Solana receiveMessage
-  // Auto-relay does NOT work for Solana destinations (standard finality).
-  // We must poll attestation and call receiveMessage ourselves.
+  // Fast finality (1000): Circle auto-relays — done.
+  if (fast) {
+    return { provider: "cctp (fast)", txHash, srcChain, dstChain: "solana", amountIn: amountUsdc, amountOut: amountUsdc - feeUsdc };
+  }
+
+  // Standard finality (2000): poll attestation + manual Solana receiveMessage
   if (solanaPayerKey) {
     const attestationUrl = `https://iris-api.circle.com/v2/messages/${srcDomain}?transactionHash=${txHash}`;
     let messageBytes = "";
     let attestationBytes = "";
 
-    for (let i = 0; i < 60; i++) {
+    for (let i = 0; i < 80; i++) {
       await new Promise(r => setTimeout(r, 15000));
       try {
         const res = await fetch(attestationUrl);
@@ -1380,16 +1397,8 @@ async function executeCctpEvmToSolana(
     if (messageBytes && attestationBytes) {
       try {
         const receiveSig = await executeSolanaReceiveMessage(messageBytes, attestationBytes, recipientAddress, solanaPayerKey);
-        return {
-          provider: "cctp" as const,
-          txHash,
-          receiveTxHash: receiveSig,
-          srcChain,
-          dstChain: "solana",
-          amountIn: amountUsdc,
-          amountOut: amountUsdc - feeUsdc,
-        };
-      } catch { /* may fail if already relayed — continue without receiveTxHash */ }
+        return { provider: "cctp", txHash, receiveTxHash: receiveSig, srcChain, dstChain: "solana", amountIn: amountUsdc, amountOut: amountUsdc - feeUsdc };
+      } catch { /* may fail if already relayed */ }
     }
   }
 
@@ -1796,8 +1805,9 @@ export async function executeBestBridge(
   signerKey: string,
   senderAddress: string,
   recipientAddress: string,
-  dstSignerKey?: string, // Optional EVM key for auto receiveMessage (Solana→EVM)
+  dstSignerKey?: string, // Optional EVM key for manual receiveMessage (standard finality)
   provider?: "cctp" | "relay" | "debridge",
+  fast: boolean = false,
 ): Promise<BridgeResult> {
   let quote: BridgeQuote;
 
@@ -1812,7 +1822,7 @@ export async function executeBestBridge(
   }
 
   if (quote.provider === "cctp") {
-    return executeCctpBridge(srcChain, dstChain, amountUsdc, signerKey, recipientAddress, dstSignerKey);
+    return executeCctpBridge(srcChain, dstChain, amountUsdc, signerKey, recipientAddress, dstSignerKey, fast);
   }
 
   if (quote.provider === "relay") {

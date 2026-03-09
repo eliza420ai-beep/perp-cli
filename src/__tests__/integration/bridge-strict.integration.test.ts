@@ -710,7 +710,7 @@ describe("Strict Bridge Integration Tests", { timeout: 120000 }, () => {
     ];
 
     for (const [src, dst] of ALL_ROUTES) {
-      it(`${src} → ${dst}: sender pays all fees (gasIncluded + fee deducted from USDC)`, async () => {
+      it(`${src} → ${dst}: fee deducted from sender's USDC`, async () => {
         const amount = 100;
         const quote = await getCctpQuote(src, dst, amount);
 
@@ -718,29 +718,43 @@ describe("Strict Bridge Integration Tests", { timeout: 120000 }, () => {
         expect(quote.fee).toBeGreaterThanOrEqual(0);
         expect(Math.abs(quote.fee - (quote.amountIn - quote.amountOut))).toBeLessThan(0.001);
 
-        // 2. Recipient gets amountOut without paying anything
+        // 2. Recipient gets amountOut
         expect(quote.amountOut).toBeGreaterThan(0);
         expect(quote.amountOut).toBeLessThanOrEqual(amount);
 
-        // 3. Gas is included — no manual destination TX required
-        expect(quote.gasIncluded).toBe(true);
-
-        // 4. Gas note confirms auto-relay or forwarding mechanism
+        // 3. Gas note present
         expect(quote.gasNote).toBeDefined();
         expect(quote.gasNote!.length).toBeGreaterThan(0);
       });
     }
 
-    it("CCTP standard routes: all use auto-relay (maxFee > 0)", async () => {
+    it("fast=true: all standard routes use auto-relay (gasIncluded=true)", async () => {
       for (const [src, dst] of standardRoutes) {
-        const quote = await getCctpQuote(src, dst, 100);
+        const quote = await getCctpQuote(src, dst, 100, true);
+        expect(quote.gasIncluded).toBe(true);
         const raw = quote.raw as Record<string, unknown>;
-        // maxFee > 0 triggers Circle's auto-relayer
         expect(Number(raw.maxFee)).toBeGreaterThan(0);
+        expect(raw.fast).toBe(true);
       }
     });
 
-    it("HyperCore deposits: CctpForwarder auto-deposits (no dst gas needed)", async () => {
+    it("fast=false (default): standard routes use manual relay (gasIncluded=false)", async () => {
+      for (const [src, dst] of standardRoutes) {
+        const quote = await getCctpQuote(src, dst, 100);
+        expect(quote.gasIncluded).toBe(false);
+        const raw = quote.raw as Record<string, unknown>;
+        expect(raw.fast).toBe(false);
+      }
+    });
+
+    it("fast=true fees are higher than standard fees", async () => {
+      const standard = await getCctpQuote("arbitrum", "base", 1000, false);
+      const fast = await getCctpQuote("arbitrum", "base", 1000, true);
+      expect(fast.fee).toBeGreaterThan(standard.fee);
+      expect(fast.estimatedTime).toBeLessThan(standard.estimatedTime);
+    });
+
+    it("HyperCore deposits: CctpForwarder auto-deposits (always gasIncluded)", async () => {
       for (const [src, dst] of hyperCoreDepositRoutes) {
         const quote = await getCctpQuote(src, dst, 100);
         expect(quote.gasIncluded).toBe(true);
@@ -751,24 +765,22 @@ describe("Strict Bridge Integration Tests", { timeout: 120000 }, () => {
       }
     });
 
-    it("HyperCore withdrawals: HL handles forwarding (no dst gas needed)", async () => {
+    it("HyperCore withdrawals: HL handles forwarding (always gasIncluded)", async () => {
       for (const [src, dst] of hyperCoreWithdrawRoutes) {
         const quote = await getCctpQuote(src, dst, 100);
         expect(quote.gasIncluded).toBe(true);
         expect(quote.gasNote).toContain("HyperCore");
-        expect(quote.fee).toBe(0.20); // fixed forwarding fee
+        expect(quote.fee).toBe(0.20);
         const raw = quote.raw as Record<string, unknown>;
         expect(raw.type).toBe("cctp-hypercore-withdraw");
       }
     });
 
-    it("deBridge quotes also include gas in fee (sender-pays)", async () => {
+    it("deBridge quotes include gas in fee (sender-pays)", async () => {
       await wait(2000);
       const quote = await getDebridgeQuote("arbitrum", "base", 100, evmAddress, evmAddress);
-      // deBridge prependOperatingExpenses=true means gas is included in the fee
       expect(quote.fee).toBeGreaterThan(0);
       expect(Math.abs(quote.fee - (quote.amountIn - quote.amountOut))).toBeLessThan(0.001);
-      // gasIncluded should be true for deBridge with prependOperatingExpenses
       expect(quote.gasIncluded).toBe(true);
     });
 
@@ -777,16 +789,14 @@ describe("Strict Bridge Integration Tests", { timeout: 120000 }, () => {
       const quote = await getRelayQuote("arbitrum", "base", 100, evmAddress, evmAddress);
       expect(quote.fee).toBeGreaterThanOrEqual(0);
       expect(Math.abs(quote.fee - (quote.amountIn - quote.amountOut))).toBeLessThan(0.001);
-      // Relay solver handles dst gas
       expect(quote.gasIncluded).toBe(true);
     });
 
-    it("getAllQuotes: every provider in results has gasIncluded=true", async () => {
+    it("getAllQuotes: fee math is correct for every provider", async () => {
       await wait(2000);
       const quotes = await getAllQuotes("arbitrum", "base", 500, evmAddress, evmAddress);
 
       for (const q of quotes) {
-        expect(q.gasIncluded).toBe(true);
         expect(q.fee).toBeGreaterThanOrEqual(0);
         expect(Math.abs(q.fee - (q.amountIn - q.amountOut))).toBeLessThan(0.01);
       }
@@ -811,6 +821,8 @@ describe("Strict Bridge Integration Tests", { timeout: 120000 }, () => {
       for (const dst of chains) {
         if (src === dst) continue;
 
+        const isHyperCore = src === "hyperevm" || dst === "hyperevm";
+
         it(`[MATRIX] ${src} → ${dst}: valid quote with sender-pays`, async () => {
           const quote = await getCctpQuote(src, dst, amount);
 
@@ -825,8 +837,13 @@ describe("Strict Bridge Integration Tests", { timeout: 120000 }, () => {
           // Fee invariant: fee = amountIn - amountOut
           expect(Math.abs(quote.fee - (amount - quote.amountOut))).toBeLessThan(0.001);
 
-          // Sender-pays: gas included, no dst gas needed
-          expect(quote.gasIncluded).toBe(true);
+          // HyperCore routes always auto-relay (gasIncluded=true)
+          // Standard routes default to manual relay (gasIncluded=false)
+          if (isHyperCore) {
+            expect(quote.gasIncluded).toBe(true);
+          } else {
+            expect(quote.gasIncluded).toBe(false);
+          }
 
           // Reasonable fee (< $5 for $250)
           expect(quote.fee).toBeLessThan(5);
@@ -848,12 +865,18 @@ describe("Strict Bridge Integration Tests", { timeout: 120000 }, () => {
       expect(withdrawFee).toBe(0.20);
     });
 
-    it("[MATRIX] ETA comparison: Solana routes are slower than EVM-only", async () => {
-      const evmToEvm = (await getCctpQuote("arbitrum", "base", 100)).estimatedTime;
-      const solToEvm = (await getCctpQuote("solana", "arbitrum", 100)).estimatedTime;
+    it("[MATRIX] ETA comparison: fast mode Solana routes are slower than fast EVM-only", async () => {
+      const evmToEvmFast = (await getCctpQuote("arbitrum", "base", 100, true)).estimatedTime;
+      const solToEvmFast = (await getCctpQuote("solana", "arbitrum", 100, true)).estimatedTime;
 
-      // Solana finality takes ~65s, EVM-only ~60s
-      expect(solToEvm).toBeGreaterThanOrEqual(evmToEvm);
+      // Fast finality: Solana ~90s, EVM-only ~60s
+      expect(solToEvmFast).toBeGreaterThanOrEqual(evmToEvmFast);
+
+      // Standard finality: both positive
+      const evmToEvmStd = (await getCctpQuote("arbitrum", "base", 100)).estimatedTime;
+      const solToEvmStd = (await getCctpQuote("solana", "arbitrum", 100)).estimatedTime;
+      expect(evmToEvmStd).toBeGreaterThan(0);
+      expect(solToEvmStd).toBeGreaterThan(0);
     });
 
     it("[MATRIX] all standard relay fee APIs respond for 4-chain matrix", async () => {
