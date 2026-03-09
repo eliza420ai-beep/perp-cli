@@ -546,11 +546,12 @@ describe("Strict Bridge Integration Tests", { timeout: 120000 }, () => {
   // ══════════════════════════════════════════════════════════
 
   describe("10. getBestQuote selection", () => {
-    it("CCTP route preferred for standard chains (lowest fee)", async () => {
+    it("best quote is cheapest provider for standard chains", async () => {
       const quote = await getBestQuote("arbitrum", "base", 500, evmAddress, evmAddress);
 
-      expect(quote.provider).toBe("cctp");
-      expect(quote.amountOut).toBeGreaterThanOrEqual(499);
+      // Best quote should be either CCTP or Relay (both valid, sorted by amountOut)
+      expect(["cctp", "relay"]).toContain(quote.provider);
+      expect(quote.amountOut).toBeGreaterThanOrEqual(498);
       expect(quote.fee).toBeLessThan(2);
     });
 
@@ -792,12 +793,19 @@ describe("Strict Bridge Integration Tests", { timeout: 120000 }, () => {
       }
     });
 
-    it("fast=false (default): standard routes use manual relay (gasIncluded=false)", async () => {
+    it("fast=false (default): forwarding routes have gasIncluded=true, Solana dst has gasIncluded=false", async () => {
       for (const [src, dst] of standardRoutes) {
         const quote = await getCctpQuote(src, dst, 100);
-        expect(quote.gasIncluded).toBe(false);
         const raw = quote.raw as Record<string, unknown>;
         expect(raw.fast).toBe(false);
+        // Forwarding available for all routes except →Solana
+        if (dst === "solana") {
+          expect(quote.gasIncluded).toBe(false);
+          expect(raw.forwarding).toBe(false);
+        } else {
+          expect(quote.gasIncluded).toBe(true);
+          expect(raw.forwarding).toBe(true);
+        }
       }
     });
 
@@ -875,8 +883,6 @@ describe("Strict Bridge Integration Tests", { timeout: 120000 }, () => {
       for (const dst of chains) {
         if (src === dst) continue;
 
-        const isHyperCore = src === "hyperevm" || dst === "hyperevm";
-
         it(`[MATRIX] ${src} → ${dst}: valid quote with sender-pays`, async () => {
           const quote = await getCctpQuote(src, dst, amount);
 
@@ -891,12 +897,12 @@ describe("Strict Bridge Integration Tests", { timeout: 120000 }, () => {
           // Fee invariant: fee = amountIn - amountOut
           expect(Math.abs(quote.fee - (amount - quote.amountOut))).toBeLessThan(0.001);
 
-          // HyperCore routes always auto-relay (gasIncluded=true)
-          // Standard routes default to manual relay (gasIncluded=false)
-          if (isHyperCore) {
-            expect(quote.gasIncluded).toBe(true);
-          } else {
+          // gasIncluded: true for HyperCore, forwarding (EVM dst), and fast
+          // Only →Solana in standard mode has gasIncluded=false (no forwarding)
+          if (dst === "solana" && src !== "hyperevm") {
             expect(quote.gasIncluded).toBe(false);
+          } else {
+            expect(quote.gasIncluded).toBe(true);
           }
 
           // Reasonable fee (< $5 for $250)
