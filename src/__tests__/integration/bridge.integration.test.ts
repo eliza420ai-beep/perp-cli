@@ -58,7 +58,7 @@ describe("Bridge Integration — Read-Only", { timeout: 60000 }, () => {
 
     it("exchange-to-chain mapping covers all exchanges", () => {
       expect(EXCHANGE_TO_CHAIN.pacifica).toBe("solana");
-      expect(EXCHANGE_TO_CHAIN.hyperliquid).toBe("hyperevm");
+      expect(EXCHANGE_TO_CHAIN.hyperliquid).toBe("hyperliquid");
       expect(EXCHANGE_TO_CHAIN.lighter).toBe("arbitrum");
     });
 

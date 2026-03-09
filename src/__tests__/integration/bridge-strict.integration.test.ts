@@ -106,7 +106,7 @@ describe("Strict Bridge Integration Tests", { timeout: 120000 }, () => {
   describe("2. Configuration consistency", () => {
     it("EXCHANGE_TO_CHAIN maps correctly", () => {
       expect(EXCHANGE_TO_CHAIN.pacifica).toBe("solana");
-      expect(EXCHANGE_TO_CHAIN.hyperliquid).toBe("hyperevm");
+      expect(EXCHANGE_TO_CHAIN.hyperliquid).toBe("hyperliquid");
       expect(EXCHANGE_TO_CHAIN.lighter).toBe("arbitrum");
     });
 
@@ -122,11 +122,11 @@ describe("Strict Bridge Integration Tests", { timeout: 120000 }, () => {
       }
     });
 
-    it("CCTP domains include hyperevm (19)", () => {
+    it("CCTP domains include hyperliquid (19)", () => {
       expect(CCTP_DOMAINS.solana).toBe(5);
       expect(CCTP_DOMAINS.arbitrum).toBe(3);
       expect(CCTP_DOMAINS.base).toBe(6);
-      expect(CCTP_DOMAINS.hyperevm).toBe(19);
+      expect(CCTP_DOMAINS.hyperliquid).toBe(19);
     });
 
     it("no unsupported chains leak into config", () => {
@@ -136,8 +136,8 @@ describe("Strict Bridge Integration Tests", { timeout: 120000 }, () => {
       }
     });
 
-    it("CCTP domains only contain supported chains + hyperevm", () => {
-      const allowed = ["solana", "arbitrum", "base", "hyperevm"];
+    it("CCTP domains only contain supported chains + hyperliquid", () => {
+      const allowed = ["solana", "arbitrum", "base", "hyperliquid"];
       for (const chain of Object.keys(CCTP_DOMAINS)) {
         expect(allowed).toContain(chain);
       }
@@ -281,12 +281,12 @@ describe("Strict Bridge Integration Tests", { timeout: 120000 }, () => {
   // ══════════════════════════════════════════════════════════
 
   describe("5. HyperCore CCTP quotes", () => {
-    it("solana → hyperevm: valid HyperCore deposit quote", async () => {
-      const quote = await getCctpQuote("solana", "hyperevm", 500);
+    it("solana → hyperliquid: valid HyperCore deposit quote", async () => {
+      const quote = await getCctpQuote("solana", "hyperliquid", 500);
 
       expect(quote.provider).toBe("cctp");
       expect(quote.srcChain).toBe("solana");
-      expect(quote.dstChain).toBe("hyperevm");
+      expect(quote.dstChain).toBe("hyperliquid");
       expect(quote.amountIn).toBe(500);
       expect(quote.amountOut).toBeGreaterThan(0);
       expect(quote.amountOut).toBeLessThan(500);
@@ -298,12 +298,12 @@ describe("Strict Bridge Integration Tests", { timeout: 120000 }, () => {
       expect(quote.raw).toHaveProperty("maxFee");
     });
 
-    it("arbitrum → hyperevm: valid HyperCore deposit quote", async () => {
-      const quote = await getCctpQuote("arbitrum", "hyperevm", 1000);
+    it("arbitrum → hyperliquid: valid HyperCore deposit quote", async () => {
+      const quote = await getCctpQuote("arbitrum", "hyperliquid", 1000);
 
       expect(quote.provider).toBe("cctp");
       expect(quote.srcChain).toBe("arbitrum");
-      expect(quote.dstChain).toBe("hyperevm");
+      expect(quote.dstChain).toBe("hyperliquid");
       expect(quote.amountIn).toBe(1000);
       expect(quote.amountOut).toBeGreaterThan(0);
       expect(quote.fee).toBeGreaterThan(0);
@@ -313,21 +313,21 @@ describe("Strict Bridge Integration Tests", { timeout: 120000 }, () => {
       expect(quote.raw).toHaveProperty("type", "cctp-hypercore");
     });
 
-    it("base → hyperevm: valid HyperCore deposit quote", async () => {
-      const quote = await getCctpQuote("base", "hyperevm", 200);
+    it("base → hyperliquid: valid HyperCore deposit quote", async () => {
+      const quote = await getCctpQuote("base", "hyperliquid", 200);
 
       expect(quote.provider).toBe("cctp");
-      expect(quote.dstChain).toBe("hyperevm");
+      expect(quote.dstChain).toBe("hyperliquid");
       expect(quote.amountOut).toBeGreaterThan(0);
       expect(quote.fee).toBeLessThan(5);
       expect(quote.estimatedTime).toBe(60);
     });
 
-    it("hyperevm → arbitrum: valid HyperCore withdrawal quote", async () => {
-      const quote = await getCctpQuote("hyperevm", "arbitrum", 300);
+    it("hyperliquid → arbitrum: valid HyperCore withdrawal quote", async () => {
+      const quote = await getCctpQuote("hyperliquid", "arbitrum", 300);
 
       expect(quote.provider).toBe("cctp");
-      expect(quote.srcChain).toBe("hyperevm");
+      expect(quote.srcChain).toBe("hyperliquid");
       expect(quote.dstChain).toBe("arbitrum");
       expect(quote.amountIn).toBe(300);
       expect(quote.amountOut).toBe(299.80); // $0.20 forwarding fee
@@ -337,19 +337,19 @@ describe("Strict Bridge Integration Tests", { timeout: 120000 }, () => {
       expect(quote.raw).toHaveProperty("type", "cctp-hypercore-withdraw");
     });
 
-    it("hyperevm → solana: valid HyperCore withdrawal quote", async () => {
-      const quote = await getCctpQuote("hyperevm", "solana", 100);
+    it("hyperliquid → solana: valid HyperCore withdrawal quote", async () => {
+      const quote = await getCctpQuote("hyperliquid", "solana", 100);
 
       expect(quote.provider).toBe("cctp");
-      expect(quote.srcChain).toBe("hyperevm");
+      expect(quote.srcChain).toBe("hyperliquid");
       expect(quote.dstChain).toBe("solana");
       expect(quote.fee).toBe(0.20);
       expect(quote.amountOut).toBe(99.80);
     });
 
     it("HyperCore fees scale correctly with amount", async () => {
-      const small = await getCctpQuote("arbitrum", "hyperevm", 10);
-      const large = await getCctpQuote("arbitrum", "hyperevm", 10000);
+      const small = await getCctpQuote("arbitrum", "hyperliquid", 10);
+      const large = await getCctpQuote("arbitrum", "hyperliquid", 10000);
 
       // Protocol fee is 1bp, so large amount pays more
       expect(large.fee).toBeGreaterThan(small.fee);
@@ -457,7 +457,7 @@ describe("Strict Bridge Integration Tests", { timeout: 120000 }, () => {
 
     it("unsupported chain throws", async () => {
       await expect(
-        getDebridgeQuote("hyperevm", "arbitrum", 100, evmAddress, evmAddress)
+        getDebridgeQuote("hyperliquid", "arbitrum", 100, evmAddress, evmAddress)
       ).rejects.toThrow(/Unsupported chain/i);
     });
   });
@@ -585,14 +585,14 @@ describe("Strict Bridge Integration Tests", { timeout: 120000 }, () => {
     });
 
     it("HyperCore CCTP fee is reasonable ($0.20-$2 range)", async () => {
-      const quote = await getCctpQuote("arbitrum", "hyperevm", 1000);
+      const quote = await getCctpQuote("arbitrum", "hyperliquid", 1000);
       expect(quote.fee).toBeGreaterThanOrEqual(0.10);
       expect(quote.fee).toBeLessThan(3);
     });
 
     it("HyperCore withdrawal fee is fixed at $0.20", async () => {
-      const q100 = await getCctpQuote("hyperevm", "arbitrum", 100);
-      const q10000 = await getCctpQuote("hyperevm", "arbitrum", 10000);
+      const q100 = await getCctpQuote("hyperliquid", "arbitrum", 100);
+      const q10000 = await getCctpQuote("hyperliquid", "arbitrum", 10000);
 
       expect(q100.fee).toBe(0.20);
       expect(q10000.fee).toBe(0.20);
@@ -632,7 +632,7 @@ describe("Strict Bridge Integration Tests", { timeout: 120000 }, () => {
       const cctp = await getCctpQuote("arbitrum", "base", 100);
       expect(typeof cctp.gasIncluded).toBe("boolean");
 
-      const hypercore = await getCctpQuote("arbitrum", "hyperevm", 100);
+      const hypercore = await getCctpQuote("arbitrum", "hyperliquid", 100);
       expect(hypercore.gasIncluded).toBe(true);
     });
   });
@@ -706,8 +706,8 @@ describe("Strict Bridge Integration Tests", { timeout: 120000 }, () => {
         [5, 3],   // solana → arbitrum
         [3, 6],   // arbitrum → base
         [6, 5],   // base → solana
-        [3, 19],  // arbitrum → hyperevm
-        [5, 19],  // solana → hyperevm
+        [3, 19],  // arbitrum → hyperliquid
+        [5, 19],  // solana → hyperliquid
       ];
 
       for (const [src, dst] of routes) {
@@ -735,7 +735,7 @@ describe("Strict Bridge Integration Tests", { timeout: 120000 }, () => {
   // ══════════════════════════════════════════════════════════
 
   describe("15. SENDER-PAYS-ONLY verification", () => {
-    // All 4 chains: arbitrum, base, solana, hyperevm
+    // All 4 chains: arbitrum, base, solana, hyperliquid
     // Standard routes (6 pairs among arb/base/sol)
     const standardRoutes: [string, string][] = [
       ["arbitrum", "base"],
@@ -748,14 +748,14 @@ describe("Strict Bridge Integration Tests", { timeout: 120000 }, () => {
 
     // HyperCore routes (deposit into + withdrawal from)
     const hyperCoreDepositRoutes: [string, string][] = [
-      ["arbitrum", "hyperevm"],
-      ["base", "hyperevm"],
-      ["solana", "hyperevm"],
+      ["arbitrum", "hyperliquid"],
+      ["base", "hyperliquid"],
+      ["solana", "hyperliquid"],
     ];
     const hyperCoreWithdrawRoutes: [string, string][] = [
-      ["hyperevm", "arbitrum"],
-      ["hyperevm", "base"],
-      ["hyperevm", "solana"],
+      ["hyperliquid", "arbitrum"],
+      ["hyperliquid", "base"],
+      ["hyperliquid", "solana"],
     ];
 
     const ALL_ROUTES = [
@@ -870,13 +870,13 @@ describe("Strict Bridge Integration Tests", { timeout: 120000 }, () => {
   // ══════════════════════════════════════════════════════════
   //
   // Verify every possible directional pair among:
-  // arbitrum, base, solana, hyperevm (12 pairs total)
+  // arbitrum, base, solana, hyperliquid (12 pairs total)
   //
   // For each: valid quote, correct fee math, gasIncluded
   // ══════════════════════════════════════════════════════════
 
   describe("16. Complete 4-chain route matrix", () => {
-    const chains = ["arbitrum", "base", "solana", "hyperevm"];
+    const chains = ["arbitrum", "base", "solana", "hyperliquid"];
     const amount = 250;
 
     for (const src of chains) {
@@ -899,7 +899,7 @@ describe("Strict Bridge Integration Tests", { timeout: 120000 }, () => {
 
           // gasIncluded: true for HyperCore, forwarding (EVM dst), and fast
           // Only →Solana in standard mode has gasIncluded=false (no forwarding)
-          if (dst === "solana" && src !== "hyperevm") {
+          if (dst === "solana" && src !== "hyperliquid") {
             expect(quote.gasIncluded).toBe(false);
           } else {
             expect(quote.gasIncluded).toBe(true);
@@ -916,8 +916,8 @@ describe("Strict Bridge Integration Tests", { timeout: 120000 }, () => {
 
     it("[MATRIX] fee comparison: HyperCore deposit > standard CCTP > HyperCore withdrawal", async () => {
       const standardFee = (await getCctpQuote("arbitrum", "base", 1000)).fee;
-      const depositFee = (await getCctpQuote("arbitrum", "hyperevm", 1000)).fee;
-      const withdrawFee = (await getCctpQuote("hyperevm", "arbitrum", 1000)).fee;
+      const depositFee = (await getCctpQuote("arbitrum", "hyperliquid", 1000)).fee;
+      const withdrawFee = (await getCctpQuote("hyperliquid", "arbitrum", 1000)).fee;
 
       // HyperCore deposit has protocol + forwarding fee (> standard)
       expect(depositFee).toBeGreaterThanOrEqual(standardFee);
@@ -945,7 +945,7 @@ describe("Strict Bridge Integration Tests", { timeout: 120000 }, () => {
         { chain: "arbitrum", domain: 3 },
         { chain: "base", domain: 6 },
         { chain: "solana", domain: 5 },
-        { chain: "hyperevm", domain: 19 },
+        { chain: "hyperliquid", domain: 19 },
       ];
 
       const results: string[] = [];

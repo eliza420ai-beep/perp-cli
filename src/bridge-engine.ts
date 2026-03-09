@@ -27,7 +27,7 @@ export const USDC_ADDRESSES: Record<string, string> = {
 // Exchange → chain mapping
 export const EXCHANGE_TO_CHAIN: Record<string, string> = {
   pacifica: "solana",
-  hyperliquid: "hyperevm", // HyperCore CCTP: direct deposit to perps via CctpForwarder (domain 19)
+  hyperliquid: "hyperliquid", // HyperCore CCTP: direct deposit to perps via CctpForwarder (domain 19)
   lighter: "arbitrum",
 };
 
@@ -36,7 +36,7 @@ const RPC_URLS: Record<string, string> = {
   solana: "https://api.mainnet-beta.solana.com",
   arbitrum: "https://arb1.arbitrum.io/rpc",
   base: "https://mainnet.base.org",
-  hyperevm: "https://rpc.hyperliquid.xyz/evm",
+  hyperliquid: "https://rpc.hyperliquid.xyz/evm",
 };
 
 // ── CCTP V2 Forwarding Service ──
@@ -198,7 +198,7 @@ const MIN_GAS: Record<string, { amount: number; symbol: string }> = {
   solana:   { amount: 0.01,   symbol: "SOL" },
   arbitrum: { amount: 0.0001, symbol: "ETH" },
   base:     { amount: 0.0001, symbol: "ETH" },
-  hyperevm: { amount: 0.0001, symbol: "ETH" },
+  hyperliquid: { amount: 0.0001, symbol: "ETH" },
 };
 
 /**
@@ -549,7 +549,7 @@ export const CCTP_DOMAINS: Record<string, number> = {
   arbitrum: 3,
   solana: 5,
   base: 6,
-  hyperevm: 19,
+  hyperliquid: 19,
 };
 
 // EVM V2 contracts — ALL EVM chains use the same V2 proxy addresses (per Circle docs)
@@ -603,7 +603,7 @@ export async function getCctpQuote(
   if (!isCctpSupported(dstChain)) throw new Error(`CCTP not supported on ${dstChain}`);
 
   // HyperCore → EVM: HL withdrawal + CCTP forwarding (~0.20 USDC fee)
-  if (srcChain === "hyperevm") {
+  if (srcChain === "hyperliquid") {
     const forwardingFee = 0.20; // CCTP forwarding fee for Arbitrum
     return {
       provider: "cctp",
@@ -619,7 +619,7 @@ export async function getCctpQuote(
     };
   }
 
-  const isHyperCore = dstChain === "hyperevm";
+  const isHyperCore = dstChain === "hyperliquid";
 
   // HyperCore route has protocol fee + forwarding fee
   if (isHyperCore) {
@@ -691,14 +691,14 @@ export async function executeCctpBridge(
   fast: boolean = false,
 ): Promise<BridgeResult> {
   // HyperCore route: depositForBurnWithHook via CctpForwarder
-  if (dstChain === "hyperevm") {
+  if (dstChain === "hyperliquid") {
     if (srcChain === "solana") {
       return executeCctpSolanaToHyperCore(amountUsdc, signerKey, recipientAddress);
     }
     return executeCctpEvmToHyperCore(srcChain, amountUsdc, signerKey, recipientAddress);
   }
   // HyperCore → EVM: sendToEvmWithData via HL exchange API
-  if (srcChain === "hyperevm") {
+  if (srcChain === "hyperliquid") {
     return executeCctpHyperCoreToEvm(dstChain, amountUsdc, signerKey, recipientAddress);
   }
   if (srcChain === "solana") {
@@ -862,7 +862,7 @@ async function executeCctpSolanaToHyperCore(
     provider: "cctp (HyperCore)",
     txHash: signature,
     srcChain: "solana",
-    dstChain: "hyperevm",
+    dstChain: "hyperliquid",
     amountIn: amountUsdc,
     amountOut: amountUsdc - fees.totalFee,
   };
@@ -980,7 +980,7 @@ async function executeCctpHyperCoreToEvm(
   return {
     provider: "cctp (HyperCore → EVM via sendToEvmWithData)",
     txHash: typeof result.response === "string" ? result.response : JSON.stringify(result.response ?? result.data ?? "submitted"),
-    srcChain: "hyperevm",
+    srcChain: "hyperliquid",
     dstChain,
     amountIn: amountUsdc,
     amountOut: amountUsdc, // forwarding fee deducted on-chain
@@ -1102,7 +1102,7 @@ async function executeCctpEvmToHyperCore(
     provider: providerLabel,
     txHash: receipt.hash,
     srcChain,
-    dstChain: "hyperevm",
+    dstChain: "hyperliquid",
     amountIn: amountUsdc,
     amountOut: amountUsdc - fees.totalFee,
   };

@@ -549,7 +549,7 @@ describe("CCTP V2 Simulation Tests", { timeout: 60000 }, () => {
   describe("CCTP domain and address consistency", () => {
     it("all CCTP domains map to valid chain IDs", () => {
       for (const [chain, domain] of Object.entries(CCTP_DOMAINS)) {
-        if (chain === "hyperevm") continue; // HyperCore uses CctpForwarder, not standard chain ID
+        if (chain === "hyperliquid") continue; // HyperCore uses CctpForwarder, not standard chain ID
         expect(typeof domain).toBe("number");
         expect(domain).toBeGreaterThanOrEqual(0);
         expect(CHAIN_IDS[chain as keyof typeof CHAIN_IDS]).toBeGreaterThan(0);
@@ -557,7 +557,7 @@ describe("CCTP V2 Simulation Tests", { timeout: 60000 }, () => {
     });
 
     it("all EVM CCTP chains have USDC addresses", () => {
-      const evmChains = Object.keys(CCTP_DOMAINS).filter(c => c !== "solana" && c !== "hyperevm");
+      const evmChains = Object.keys(CCTP_DOMAINS).filter(c => c !== "solana" && c !== "hyperliquid");
       for (const chain of evmChains) {
         expect(USDC_ADDRESSES[chain]).toMatch(/^0x[a-fA-F0-9]{40}$/);
       }
@@ -567,7 +567,7 @@ describe("CCTP V2 Simulation Tests", { timeout: 60000 }, () => {
       expect(CCTP_DOMAINS.arbitrum).toBe(3);
       expect(CCTP_DOMAINS.solana).toBe(5);
       expect(CCTP_DOMAINS.base).toBe(6);
-      expect(CCTP_DOMAINS.hyperevm).toBe(19);
+      expect(CCTP_DOMAINS.hyperliquid).toBe(19);
     });
   });
 });
