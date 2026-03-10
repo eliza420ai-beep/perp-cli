@@ -38,6 +38,7 @@ export function registerDepositCommands(
     .action(async (amount: string, opts: { relay: boolean }) => {
       const amountNum = parseFloat(amount);
       if (isNaN(amountNum) || amountNum <= 0) throw new Error("Invalid amount");
+      if (amountNum < 10) throw new Error("Minimum deposit is 10 USDC");
 
       // Try relayer first (gas-sponsored)
       if (opts.relay && await relayerAvailable()) {
@@ -126,8 +127,6 @@ export function registerDepositCommands(
       const adapter = await getAdapter();
       if (!(adapter instanceof PacificaAdapter)) throw new Error("Requires --exchange pacifica");
 
-      if (amountNum < 10) throw new Error("Minimum deposit is 10 USDC");
-
       try {
         const { Connection, Transaction } = await import("@solana/web3.js");
         const { buildDepositInstruction } = await import("../pacifica/deposit.js");
@@ -139,6 +138,20 @@ export function registerDepositCommands(
         if (solBalance < 5_000_000) {
           console.error(chalk.red("  Insufficient SOL for gas. Need ~0.005 SOL."));
           console.error(chalk.gray("  Tip: Use relayer for gasless deposits (start relayer server)\n"));
+          process.exit(1);
+        }
+
+        // Check USDC balance before sending TX
+        const { PublicKey } = await import("@solana/web3.js");
+        const USDC_MINT = new PublicKey("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
+        const tokenAccounts = await connection.getParsedTokenAccountsByOwner(
+          adapter.keypair.publicKey, { mint: USDC_MINT }
+        );
+        const usdcBalance = tokenAccounts.value.length > 0
+          ? tokenAccounts.value[0].account.data.parsed.info.tokenAmount.uiAmount ?? 0
+          : 0;
+        if (usdcBalance < amountNum) {
+          console.error(chalk.red(`  Insufficient USDC on Solana. Have: $${formatUsd(usdcBalance)}, need: $${formatUsd(amountNum)}`));
           process.exit(1);
         }
 
@@ -329,6 +342,13 @@ export function registerDepositCommands(
 
       const amountRaw = ethers.parseUnits(amount, 6);
 
+      // Check ETH balance for gas
+      const ethBal = await provider.getBalance(wallet.address);
+      if (ethBal < ethers.parseEther("0.003")) {
+        console.error(chalk.red("  Insufficient ETH on Ethereum for gas. Need ~0.003 ETH ($3+)."));
+        process.exit(1);
+      }
+
       // Check USDC balance
       const usdcBal = await usdc.balanceOf(wallet.address);
       if (usdcBal < amountRaw) {
@@ -429,7 +449,13 @@ export function registerDepositCommands(
 
       if (!isJson()) console.log(`  Intent address: ${intentAddress}`);
 
-      // 2. Check USDC balance
+      // 2. Check gas + USDC balance
+      const gasBal = await provider.getBalance(wallet.address);
+      if (gasBal < ethers.parseEther("0.00005")) {
+        console.error(chalk.red(`  Insufficient gas token on ${chainInfo.name}. Need native token for gas (~$0.01).`));
+        process.exit(1);
+      }
+
       const usdc = new ethers.Contract(chainInfo.usdc, [
         "function transfer(address to, uint256 amount) returns (bool)",
         "function balanceOf(address) view returns (uint256)",
@@ -519,6 +545,7 @@ export function registerDepositCommands(
     .requiredOption("--recipient <address>", "Recipient address on destination chain")
     .action(async (opts: { from: string; to: string; amount: string; recipient: string }) => {
       const amountNum = parseFloat(opts.amount);
+      if (isNaN(amountNum) || amountNum <= 0) throw new Error("Invalid amount");
 
       if (await relayerAvailable()) {
         if (!isJson()) console.log(chalk.cyan(`\n  Bridging $${formatUsd(amountNum)} USDC via CCTP V2 (${opts.from} → ${opts.to})...\n`));
