@@ -4,6 +4,10 @@ import { makeTable, formatUsd, formatPnl, printJson, jsonOk } from "../utils.js"
 import type { ExchangeAdapter, ExchangePosition } from "../exchanges/interface.js";
 import { readExecutionLog, logExecution, type ExecutionRecord } from "../execution-log.js";
 import { toHourlyRate, computeAnnualSpread } from "../funding.js";
+import {
+  fetchPacificaPrices, fetchHyperliquidMeta,
+  fetchLighterOrderBookDetails, fetchLighterFundingRates,
+} from "../shared-api.js";
 import { computeBasisRisk } from "../arb-utils.js";
 import { fetchAllBalances, computeRebalancePlan } from "../rebalance.js";
 import { EXCHANGE_TO_CHAIN, getBestQuote } from "../bridge-engine.js";
@@ -79,61 +83,29 @@ function formatDuration(ms: number): string {
 async function fetchFundingRatesMap(): Promise<Map<string, { exchange: string; rate: number; markPrice: number }[]>> {
   const rateMap = new Map<string, { exchange: string; rate: number; markPrice: number }[]>();
 
-  const [pacRes, hlRes, ltDetailsRes, ltFundingRes] = await Promise.all([
-    fetch("https://api.pacifica.fi/api/v1/info/prices").then(r => r.json()).catch(() => null),
-    fetch("https://api.hyperliquid.xyz/info", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ type: "metaAndAssetCtxs" }),
-    }).then(r => r.json()).catch(() => null),
-    fetch("https://mainnet.zklighter.elliot.ai/api/v1/orderBookDetails").then(r => r.json()).catch(() => null),
-    fetch("https://mainnet.zklighter.elliot.ai/api/v1/funding-rates").then(r => r.json()).catch(() => null),
+  const [pacAssets, hlAssets, ltDetails, ltFunding] = await Promise.all([
+    fetchPacificaPrices(),
+    fetchHyperliquidMeta(),
+    fetchLighterOrderBookDetails(),
+    fetchLighterFundingRates(),
   ]);
 
-  // Pacifica
-  if (Array.isArray(pacRes?.data ?? pacRes)) {
-    for (const p of (pacRes.data ?? pacRes) as Record<string, unknown>[]) {
-      const sym = String(p.symbol ?? "");
-      if (!sym) continue;
-      if (!rateMap.has(sym)) rateMap.set(sym, []);
-      rateMap.get(sym)!.push({ exchange: "pacifica", rate: Number(p.funding ?? 0), markPrice: Number(p.mark ?? 0) });
-    }
-  }
+  const addRate = (sym: string, exchange: string, rate: number, markPrice: number) => {
+    if (!sym) return;
+    if (!rateMap.has(sym)) rateMap.set(sym, []);
+    rateMap.get(sym)!.push({ exchange, rate, markPrice });
+  };
 
-  // Hyperliquid
-  if (hlRes && Array.isArray(hlRes)) {
-    const universe = hlRes[0]?.universe ?? [];
-    const ctxs = hlRes[1] ?? [];
-    universe.forEach((a: Record<string, unknown>, i: number) => {
-      const ctx = (ctxs[i] ?? {}) as Record<string, unknown>;
-      const sym = String(a.name ?? "");
-      if (!sym) return;
-      if (!rateMap.has(sym)) rateMap.set(sym, []);
-      rateMap.get(sym)!.push({ exchange: "hyperliquid", rate: Number(ctx.funding ?? 0), markPrice: Number(ctx.markPx ?? 0) });
-    });
-  }
+  for (const p of pacAssets) addRate(p.symbol, "pacifica", p.funding, p.mark);
+  for (const h of hlAssets) addRate(h.symbol, "hyperliquid", h.funding, h.markPx);
 
-  // Lighter
-  if (ltFundingRes) {
-    const idToSym = new Map<number, string>();
-    const idToPrice = new Map<number, number>();
-    if (ltDetailsRes) {
-      const details = (ltDetailsRes as Record<string, unknown>).order_book_details ?? [];
-      for (const m of details as Array<Record<string, unknown>>) {
-        idToSym.set(Number(m.market_id), String(m.symbol ?? ""));
-        if (m.last_trade_price) idToPrice.set(Number(m.market_id), Number(m.last_trade_price));
-      }
-    }
-    const fundingList = (ltFundingRes as Record<string, unknown>).funding_rates ?? [];
-    const seen = new Set<string>();
-    for (const fr of fundingList as Array<Record<string, unknown>>) {
-      const sym = String(fr.symbol ?? "") || idToSym.get(Number(fr.market_id)) || "";
-      if (!sym || seen.has(sym)) continue;
-      seen.add(sym);
-      if (!rateMap.has(sym)) rateMap.set(sym, []);
-      const mp = Number(fr.mark_price ?? 0) || idToPrice.get(Number(fr.market_id)) || 0;
-      rateMap.get(sym)!.push({ exchange: "lighter", rate: Number(fr.rate ?? fr.funding_rate ?? 0), markPrice: mp });
-    }
+  // Lighter: join details + funding by marketId
+  const ltPriceMap = new Map(ltDetails.map(d => [d.marketId, d.lastTradePrice]));
+  const ltSymMap = new Map(ltDetails.map(d => [d.marketId, d.symbol]));
+  for (const fr of ltFunding) {
+    const sym = fr.symbol || ltSymMap.get(fr.marketId) || "";
+    const mp = fr.markPrice || ltPriceMap.get(fr.marketId) || 0;
+    addRate(sym, "lighter", fr.rate, mp);
   }
 
   return rateMap;

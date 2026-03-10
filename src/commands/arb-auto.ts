@@ -4,6 +4,11 @@ import { formatUsd, printJson, jsonOk } from "../utils.js";
 import type { ExchangeAdapter } from "../exchanges/interface.js";
 import { computeExecutableSize } from "../liquidity.js";
 import { computeAnnualSpread, toHourlyRate } from "../funding.js";
+import {
+  fetchPacificaPricesRaw, parsePacificaRaw,
+  fetchHyperliquidMetaRaw, parseHyperliquidMetaRaw,
+  fetchLighterOrderBookDetailsRaw, fetchLighterFundingRatesRaw, parseLighterRaw,
+} from "../shared-api.js";
 import { scanDexArb, type DexArbPair } from "../dex-asset-map.js";
 import { logExecution, readExecutionLog } from "../execution-log.js";
 import {
@@ -43,6 +48,9 @@ interface FundingSnapshot {
   longExch: string;
   shortExch: string;
   markPrice: number; // best available mark price across exchanges
+  pacMarkPrice: number;
+  hlMarkPrice: number;
+  ltMarkPrice: number;
 }
 
 interface ArbPosition {
@@ -195,67 +203,17 @@ export function isSpreadReversed(
   return longHourly > shortHourly;
 }
 
-const LIGHTER_URL = "https://mainnet.zklighter.elliot.ai";
-
 async function fetchFundingSpreads(): Promise<FundingSnapshot[]> {
   const [pacRes, hlRes, ltDetailsRes, ltFundingRes] = await Promise.all([
-    fetch("https://api.pacifica.fi/api/v1/info/prices").then(r => r.json()).catch(() => null),
-    fetch("https://api.hyperliquid.xyz/info", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ type: "metaAndAssetCtxs" }),
-    }).then(r => r.json()).catch(() => null),
-    fetch(`${LIGHTER_URL}/api/v1/orderBookDetails`).then(r => r.json()).catch(() => null),
-    fetch(`${LIGHTER_URL}/api/v1/funding-rates`).then(r => r.json()).catch(() => null),
+    fetchPacificaPricesRaw(),
+    fetchHyperliquidMetaRaw(),
+    fetchLighterOrderBookDetailsRaw(),
+    fetchLighterFundingRatesRaw(),
   ]);
 
-  const pacRates = new Map<string, number>();
-  const pacPrices = new Map<string, number>();
-  if (Array.isArray(pacRes?.data ?? pacRes)) {
-    for (const p of (pacRes.data ?? pacRes) as Record<string, unknown>[]) {
-      pacRates.set(String(p.symbol), Number(p.funding ?? 0));
-      if (p.mark) pacPrices.set(String(p.symbol), Number(p.mark));
-    }
-  }
-
-  const hlRates = new Map<string, number>();
-  const hlPrices = new Map<string, number>();
-  if (hlRes && Array.isArray(hlRes)) {
-    const universe = hlRes[0]?.universe ?? [];
-    const ctxs = hlRes[1] ?? [];
-    universe.forEach((a: Record<string, unknown>, i: number) => {
-      const ctx = (ctxs[i] ?? {}) as Record<string, unknown>;
-      hlRates.set(String(a.name), Number(ctx.funding ?? 0));
-      if (ctx.markPx) hlPrices.set(String(a.name), Number(ctx.markPx));
-    });
-  }
-
-  const ltRates = new Map<string, number>();
-  const ltPrices = new Map<string, number>();
-  if (ltFundingRes) {
-    // Build market_id → symbol from orderBookDetails
-    const idToSym = new Map<number, string>();
-    const idToPrice = new Map<number, number>();
-    if (ltDetailsRes) {
-      const details = (ltDetailsRes as Record<string, unknown>).order_book_details ?? [];
-      for (const m of details as Array<Record<string, unknown>>) {
-        idToSym.set(Number(m.market_id), String(m.symbol ?? ""));
-        if (m.last_trade_price) idToPrice.set(Number(m.market_id), Number(m.last_trade_price));
-      }
-    }
-    const fundingList = (ltFundingRes as Record<string, unknown>).funding_rates ?? [];
-    for (const fr of fundingList as Array<Record<string, unknown>>) {
-      const sym = String(fr.symbol ?? "") || idToSym.get(Number(fr.market_id)) || "";
-      if (sym) {
-        // Deduplicate: keep only the first (latest) entry per symbol, matching funding-rates.ts
-        if (!ltRates.has(sym)) {
-          ltRates.set(sym, Number(fr.rate ?? fr.funding_rate ?? 0));
-          const mp = Number(fr.mark_price ?? 0) || idToPrice.get(Number(fr.market_id)) || 0;
-          if (mp > 0) ltPrices.set(sym, mp);
-        }
-      }
-    }
-  }
+  const { rates: pacRates, prices: pacPrices } = parsePacificaRaw(pacRes);
+  const { rates: hlRates, prices: hlPrices } = parseHyperliquidMetaRaw(hlRes);
+  const { rates: ltRates, prices: ltPrices } = parseLighterRaw(ltDetailsRes, ltFundingRes);
 
   const snapshots: FundingSnapshot[] = [];
   const allSymbols = new Set([...pacRates.keys(), ...hlRates.keys(), ...ltRates.keys()]);
@@ -290,6 +248,9 @@ async function fetchFundingSpreads(): Promise<FundingSnapshot[]> {
       longExch: lowest.exchange,  // long where funding is lowest
       shortExch: highest.exchange, // short where funding is highest
       markPrice,
+      pacMarkPrice: pacPrices.get(sym) ?? 0,
+      hlMarkPrice: hlPrices.get(sym) ?? 0,
+      ltMarkPrice: ltPrices.get(sym) ?? 0,
     });
   }
 
@@ -512,15 +473,13 @@ export function registerArbAutoCommands(
               });
             }
 
-            // Check basis risk (mark price divergence)
-            try {
-              const bLA = await getAdapterForExchange(pos.longExchange);
-              const bSA = await getAdapterForExchange(pos.shortExchange);
-              const [bLM, bSM2] = await Promise.all([bLA.getMarkets(), bSA.getMarkets()]);
-              const bLMkt = bLM.find(m => m.symbol.replace("-PERP", "").toUpperCase() === pos.symbol.toUpperCase());
-              const bSMkt = bSM2.find(m => m.symbol.replace("-PERP", "").toUpperCase() === pos.symbol.toUpperCase());
-              if (bLMkt && bSMkt) {
-                const bLP = Number(bLMkt.markPrice), bSP = Number(bSMkt.markPrice);
+            // Check basis risk (mark price divergence) — use prices from fetchFundingSpreads, no extra API calls
+            {
+              const priceFor = (e: string) =>
+                e === "pacifica" ? current.pacMarkPrice : e === "hyperliquid" ? current.hlMarkPrice : current.ltMarkPrice;
+              const bLP = priceFor(pos.longExchange);
+              const bSP = priceFor(pos.shortExchange);
+              if (bLP > 0 && bSP > 0) {
                 const basis = computeBasisRisk(bLP, bSP, maxBasisPct);
                 if (basis.warning) {
                   const bExA = (e: string) => e === "pacifica" ? "PAC" : e === "hyperliquid" ? "HL" : "LT";
@@ -534,7 +493,7 @@ export function registerArbAutoCommands(
                   });
                 }
               }
-            } catch { /* basis check failed */ }
+            }
 
             if (shouldClose) {
               console.log(chalk.yellow(`  ${now} CLOSE ${pos.symbol} — ${closeReason}`));
@@ -615,18 +574,17 @@ export function registerArbAutoCommands(
           // ── Cross-chain margin monitoring ──
           blockedExchanges.clear();
 
-          // Exchange status check
+          // Exchange status check — infer from fetchFundingSpreads results
+          // If an exchange returned rates in the scan, it's up. No extra API calls needed.
           const downExchanges = new Set<string>();
-          for (const name of ["hyperliquid", "lighter", "pacifica"]) {
-            try {
-              const adapter = await getAdapterForExchange(name);
-              // Quick health check: try to get markets (lightweight)
-              await adapter.getMarkets();
-            } catch {
-              downExchanges.add(name);
-              blockedExchanges.add(name);
-              console.log(chalk.red(`  ${now} EXCHANGE DOWN: ${name} — blocking new entries`));
-            }
+          const hasHL = filtered.some(s => s.hlRate !== 0) || spreads.some(s => s.hlRate !== 0);
+          const hasLT = filtered.some(s => s.ltRate !== 0) || spreads.some(s => s.ltRate !== 0);
+          const hasPAC = filtered.some(s => s.pacRate !== 0) || spreads.some(s => s.pacRate !== 0);
+          if (!hasHL) { downExchanges.add("hyperliquid"); blockedExchanges.add("hyperliquid"); }
+          if (!hasLT) { downExchanges.add("lighter"); blockedExchanges.add("lighter"); }
+          if (!hasPAC) { downExchanges.add("pacifica"); blockedExchanges.add("pacifica"); }
+          for (const name of downExchanges) {
+            console.log(chalk.red(`  ${now} EXCHANGE DOWN: ${name} — blocking new entries`));
           }
 
           // Mark existing positions on down exchanges as degraded
@@ -639,10 +597,14 @@ export function registerArbAutoCommands(
           }
 
           try {
-            const exchangeNames = ["hyperliquid", "lighter", "pacifica"];
+            // Only check margins when we have open positions (avoid slow adapter init)
+            const needMarginCheck = openPositions.length > 0;
             const adaptersMap = new Map<string, ExchangeAdapter>();
-            for (const name of exchangeNames) {
-              try { adaptersMap.set(name, await getAdapterForExchange(name)); } catch { /* skip */ }
+            if (needMarginCheck) {
+              const marginExchanges = ["hyperliquid", "lighter", "pacifica"];
+              for (const name of marginExchanges) {
+                try { adaptersMap.set(name, await getAdapterForExchange(name)); } catch { /* skip */ }
+              }
             }
             if (adaptersMap.size > 0) {
               const marginStatuses = await checkChainMargins(adaptersMap, minMarginPct);
@@ -1576,7 +1538,8 @@ export function registerArbAutoCommands(
 // ── Orderbook helpers for monitor ──
 
 async function fetchHLOrderbook(symbol: string): Promise<[number, number][]> {
-  const res = await fetch("https://api.hyperliquid.xyz/info", {
+  const { HYPERLIQUID_API_URL } = await import("../shared-api.js");
+  const res = await fetch(HYPERLIQUID_API_URL, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ type: "l2Book", coin: symbol }),
@@ -1587,13 +1550,14 @@ async function fetchHLOrderbook(symbol: string): Promise<[number, number][]> {
 }
 
 async function fetchLighterOrderbook(symbol: string): Promise<[number, number][]> {
-  const detailsRes = await fetch("https://mainnet.zklighter.elliot.ai/api/v1/orderBookDetails");
+  const { LIGHTER_API_URL } = await import("../shared-api.js");
+  const detailsRes = await fetch(`${LIGHTER_API_URL}/api/v1/orderBookDetails`);
   const details = await detailsRes.json();
   const m = ((details as Record<string, unknown>).order_book_details as Array<Record<string, unknown>> ?? [])
     .find(d => d.symbol === symbol);
   if (!m) return [];
   const marketId = Number(m.market_id);
-  const obRes = await fetch(`https://mainnet.zklighter.elliot.ai/api/v1/orderBookOrders?market_id=${marketId}&limit=10`);
+  const obRes = await fetch(`${LIGHTER_API_URL}/api/v1/orderBookOrders?market_id=${marketId}&limit=10`);
   const ob = await obRes.json();
   const bids = (ob as Record<string, unknown>).bids as Array<Record<string, string>> ?? [];
   return bids.map(l => [Number(l.price), Number(l.remaining_base_amount)] as [number, number]);

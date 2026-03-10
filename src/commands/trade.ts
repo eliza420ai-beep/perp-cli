@@ -17,8 +17,35 @@ function pac(adapter: ExchangeAdapter): PacificaAdapter {
 export function registerTradeCommands(
   program: Command,
   getAdapter: () => Promise<ExchangeAdapter>,
-  isJson: () => boolean
+  isJson: () => boolean,
+  isDryRun: () => boolean = () => false,
 ) {
+  /** Guard: if --dry-run is active, log the intended action and return without executing. */
+  function dryRunGuard(action: string, details: Record<string, unknown>): boolean {
+    if (!isDryRun()) return false;
+    const info = { dryRun: true, action, ...details, timestamp: new Date().toISOString() };
+    if (isJson()) {
+      printJson(jsonOk(info));
+    } else {
+      console.log(chalk.yellow(`\n  [DRY RUN] Would ${action}:`));
+      for (const [k, v] of Object.entries(details)) {
+        console.log(chalk.gray(`    ${k}: ${v}`));
+      }
+      console.log();
+    }
+    logExecution({
+      type: action.includes("limit") ? "limit_order" : action.includes("stop") ? "stop_order" : action.includes("cancel") ? "cancel" : "market_order",
+      exchange: details.exchange as string ?? "unknown",
+      symbol: (details.symbol as string ?? "").toUpperCase(),
+      side: details.side as string ?? "",
+      size: String(details.size ?? "0"),
+      price: details.price as string,
+      status: "simulated",
+      dryRun: true,
+    });
+    return true;
+  }
+
   const trade = program.command("trade").description("Trading commands");
 
   // === Generic commands (all exchanges) ===
@@ -43,6 +70,8 @@ export function registerTradeCommands(
       }
 
       const adapter = await getAdapter();
+
+      if (dryRunGuard("market_order", { exchange: adapter.name, symbol: symbol.toUpperCase(), side: s, size })) return;
 
       if (clientId) {
         logClientId({
@@ -99,6 +128,7 @@ export function registerTradeCommands(
         return;
       }
       const adapter = await getAdapter();
+      if (dryRunGuard("market_order", { exchange: adapter.name, symbol: symbol.toUpperCase(), side: "buy", size })) return;
       let result: unknown;
       try {
         result = await adapter.marketOrder(symbol.toUpperCase(), "buy", size);
@@ -127,6 +157,7 @@ export function registerTradeCommands(
         return;
       }
       const adapter = await getAdapter();
+      if (dryRunGuard("market_order", { exchange: adapter.name, symbol: symbol.toUpperCase(), side: "sell", size })) return;
       let result: unknown;
       try {
         result = await adapter.marketOrder(symbol.toUpperCase(), "sell", size);
@@ -160,6 +191,8 @@ export function registerTradeCommands(
       }
 
       const adapter = await getAdapter();
+
+      if (dryRunGuard("limit_order", { exchange: adapter.name, symbol: symbol.toUpperCase(), side: s, size, price })) return;
 
       if (clientId) {
         logClientId({
@@ -205,6 +238,7 @@ export function registerTradeCommands(
     .description("Cancel a specific order")
     .action(async (symbol: string, orderId: string) => {
       const adapter = await getAdapter();
+      if (dryRunGuard("cancel", { exchange: adapter.name, symbol: symbol.toUpperCase(), orderId })) return;
       try {
         const result = await adapter.cancelOrder(symbol.toUpperCase(), orderId);
         logExecution({ type: "cancel", exchange: adapter.name, symbol: symbol.toUpperCase(), side: "cancel", size: "0", status: "success", dryRun: false, meta: { orderId } });
@@ -221,6 +255,7 @@ export function registerTradeCommands(
     .description("Cancel all open orders")
     .action(async () => {
       const adapter = await getAdapter();
+      if (dryRunGuard("cancel_all", { exchange: adapter.name })) return;
       const result = await adapter.cancelAllOrders();
       if (isJson()) return printJson(jsonOk(result));
       console.log(chalk.green(`\n  All orders cancelled on ${adapter.name}.\n`));
@@ -324,6 +359,7 @@ export function registerTradeCommands(
       if (s !== "buy" && s !== "sell") errorAndExit("Side must be buy or sell");
 
       const adapter = await getAdapter();
+      if (dryRunGuard("stop_order", { exchange: adapter.name, symbol: symbol.toUpperCase(), side: s, size, price: stopPrice })) return;
       let result: unknown;
       try {
         result = await adapter.stopOrder(
@@ -359,6 +395,7 @@ export function registerTradeCommands(
       if (!opts.tp && !opts.sl) errorAndExit("Must specify --tp and/or --sl");
 
       const adapter = await getAdapter();
+      if (dryRunGuard("tpsl", { exchange: adapter.name, symbol: symbol.toUpperCase(), side: s, tp: opts.tp ?? "none", sl: opts.sl ?? "none" })) return;
 
       if (adapter instanceof PacificaAdapter) {
         // TP/SL side is opposite of position: LONG position → "ask" to close
@@ -447,6 +484,7 @@ export function registerTradeCommands(
     .description("Edit an existing order")
     .action(async (symbol: string, orderId: string, price: string, size: string) => {
       const adapter = await getAdapter();
+      if (dryRunGuard("edit_order", { exchange: adapter.name, symbol: symbol.toUpperCase(), orderId, price, size })) return;
       const result = await adapter.editOrder(symbol.toUpperCase(), orderId, price, size);
       if (isJson()) return printJson(jsonOk(result));
       console.log(chalk.green(`\n  Order ${orderId} updated to $${price} x ${size} on ${adapter.name}.\n`));
@@ -499,6 +537,7 @@ export function registerTradeCommands(
     .action(async (symbol: string, leverage: string, opts: { isolated?: boolean }) => {
       const adapter = await getAdapter();
       const mode = opts.isolated ? "isolated" : "cross";
+      if (dryRunGuard("set_leverage", { exchange: adapter.name, symbol: symbol.toUpperCase(), leverage, mode })) return;
       try {
         const result = await adapter.setLeverage(symbol.toUpperCase(), parseInt(leverage), mode);
 
@@ -654,6 +693,7 @@ export function registerTradeCommands(
     .action(async () => {
       await withJsonErrors(isJson(), async () => {
         const adapter = await getAdapter();
+        if (dryRunGuard("close_all", { exchange: adapter.name })) return;
         const positions = await adapter.getPositions();
         if (positions.length === 0) {
           if (isJson()) return printJson(jsonOk({ closed: 0, positions: [] }));
@@ -692,6 +732,7 @@ export function registerTradeCommands(
           errorAndExit(`No open position for ${sym}`);
         }
         const closeSide = pos.side === "long" ? "sell" : "buy";
+        if (dryRunGuard("close", { exchange: adapter.name, symbol: sym, side: closeSide, size: pos.size, originalSide: pos.side })) return;
         if (!isJson()) console.log(chalk.cyan(`\n  Closing ${pos.side} ${pos.size} ${sym} on ${adapter.name}...\n`));
         const result = await adapter.marketOrder(sym, closeSide as "buy" | "sell", pos.size);
         logExecution({
@@ -710,6 +751,7 @@ export function registerTradeCommands(
     .action(async () => {
       await withJsonErrors(isJson(), async () => {
         const adapter = await getAdapter();
+        if (dryRunGuard("flatten", { exchange: adapter.name })) return;
         if (!isJson()) console.log(chalk.cyan(`\n  Flattening account on ${adapter.name}...\n`));
 
         // Step 1: Cancel all orders
@@ -754,6 +796,7 @@ export function registerTradeCommands(
         const fullSize = parseFloat(pos.size);
         const reduceSize = (fullSize * pct / 100).toString();
         const closeSide = pos.side === "long" ? "sell" : "buy";
+        if (dryRunGuard("reduce", { exchange: adapter.name, symbol: sym, side: closeSide, size: reduceSize, percent: pct, originalSize: pos.size })) return;
         if (!isJson()) console.log(chalk.cyan(`\n  Reducing ${sym} ${pos.side} by ${pct}% (${reduceSize} of ${pos.size}) on ${adapter.name}...\n`));
         const result = await adapter.marketOrder(sym, closeSide as "buy" | "sell", reduceSize);
         logExecution({

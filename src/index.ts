@@ -153,7 +153,7 @@ function getHLAdapter(): HyperliquidAdapter {
 // Register command groups with async adapter getter
 registerMarketCommands(program, getAdapter, isJson);
 registerAccountCommands(program, getAdapter, isJson);
-registerTradeCommands(program, getAdapter, isJson);
+registerTradeCommands(program, getAdapter, isJson, isDryRun);
 registerManageCommands(program, getAdapter, isJson, getPacificaAdapter);
 registerStreamCommands(program, () => program.opts().network as Network, getExchange, getAdapter);
 registerArbCommands(program, isJson);

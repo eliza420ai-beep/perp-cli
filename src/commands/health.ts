@@ -1,6 +1,7 @@
 import { Command } from "commander";
 import chalk from "chalk";
 import { printJson, jsonOk, makeTable } from "../utils.js";
+import { pingPacifica, pingHyperliquid, pingLighter } from "../shared-api.js";
 
 interface HealthResult {
   exchange: string;
@@ -29,27 +30,22 @@ export function registerHealthCommands(program: Command, isJson: () => boolean) 
     .command("health")
     .description("Check exchange API connectivity and latency")
     .action(async () => {
-      const checks = await Promise.all([
-        checkExchangeHealth("pacifica", async () => {
-          const res = await fetch("https://api.pacifica.fi/api/v1/info/prices");
-          if (!res.ok) throw new Error(`HTTP ${res.status}`);
-          await res.json();
-        }),
-        checkExchangeHealth("hyperliquid", async () => {
-          const res = await fetch("https://api.hyperliquid.xyz/info", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ type: "allMids" }),
-          });
-          if (!res.ok) throw new Error(`HTTP ${res.status}`);
-          await res.json();
-        }),
-        checkExchangeHealth("lighter", async () => {
-          const res = await fetch("https://mainnet.zklighter.elliot.ai/api/v1/orderBookDetails");
-          if (!res.ok) throw new Error(`HTTP ${res.status}`);
-          await res.json();
-        }),
+      const [pacPing, hlPing, ltPing] = await Promise.all([
+        pingPacifica(),
+        pingHyperliquid(),
+        pingLighter(),
       ]);
+      const toPingResult = (name: string, p: { ok: boolean; latencyMs: number; status: number }): HealthResult => ({
+        exchange: name,
+        status: p.ok ? "ok" : "down",
+        latency_ms: p.latencyMs,
+        error: p.ok ? undefined : `HTTP ${p.status}`,
+      });
+      const checks: HealthResult[] = [
+        toPingResult("pacifica", pacPing),
+        toPingResult("hyperliquid", hlPing),
+        toPingResult("lighter", ltPing),
+      ];
 
       const allOk = checks.every(c => c.status === "ok");
 

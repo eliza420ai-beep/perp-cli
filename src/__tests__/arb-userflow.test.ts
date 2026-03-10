@@ -91,6 +91,9 @@ interface FundingSnapshot {
   longExch: string;
   shortExch: string;
   markPrice: number;
+  pacMarkPrice: number;
+  hlMarkPrice: number;
+  ltMarkPrice: number;
 }
 
 // ─────────────────────────────────────────────────────────
@@ -308,6 +311,7 @@ describe("Flow 2: 데몬 라이프사이클 — 진입 → 펀딩 축적 → 스
       longExch: "hyperliquid",
       shortExch: "pacifica",
       markPrice: 100000,
+      pacMarkPrice: 0, hlMarkPrice: 0, ltMarkPrice: 0,
     };
     const reversed = isSpreadReversed("hyperliquid", "pacifica", snapshot);
     expect(reversed).toBe(false);
@@ -377,6 +381,7 @@ describe("Flow 3: 리버설 발생 → 긴급 청산", () => {
       longExch: "hyperliquid",
       shortExch: "pacifica",
       markPrice: 3200,
+      pacMarkPrice: 0, hlMarkPrice: 0, ltMarkPrice: 0,
     };
     const reversed = isSpreadReversed("hyperliquid", "pacifica", snapshot);
     expect(reversed).toBe(true);
@@ -392,6 +397,7 @@ describe("Flow 3: 리버설 발생 → 긴급 청산", () => {
       longExch: "hyperliquid",
       shortExch: "pacifica",
       markPrice: 3200,
+      pacMarkPrice: 0, hlMarkPrice: 0, ltMarkPrice: 0,
     };
     const reversed = isSpreadReversed("hyperliquid", "pacifica", snapshot);
     expect(reversed).toBe(false);
@@ -419,6 +425,7 @@ describe("Flow 3: 리버설 발생 → 긴급 청산", () => {
       longExch: "hyperliquid",
       shortExch: "pacifica",
       markPrice: 2.5,
+      pacMarkPrice: 0, hlMarkPrice: 0, ltMarkPrice: 0,
     };
     expect(isSpreadReversed("hyperliquid", "pacifica", snapshot)).toBe(true);
 
@@ -1045,6 +1052,7 @@ describe("Cross-cutting: edge cases and combined scenarios", () => {
       longExch: "lighter",
       shortExch: "pacifica",
       markPrice: 150,
+      pacMarkPrice: 0, hlMarkPrice: 0, ltMarkPrice: 0,
     };
     // Long LT at 0.00005, short PAC at 0.00001 → longHourly > shortHourly → reversed
     expect(isSpreadReversed("lighter", "pacifica", snapshot)).toBe(true);

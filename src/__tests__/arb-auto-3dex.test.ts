@@ -26,6 +26,9 @@ interface FundingSnapshot {
   longExch: string;
   shortExch: string;
   markPrice: number;
+  pacMarkPrice: number;
+  hlMarkPrice: number;
+  ltMarkPrice: number;
 }
 
 interface ArbPosition {
@@ -85,6 +88,7 @@ describe("3-DEX direction determination", () => {
       longExch: "lighter",
       shortExch: "pacifica",
       markPrice: 60000,
+      pacMarkPrice: 0, hlMarkPrice: 0, ltMarkPrice: 0,
     };
 
     const { longExchange, shortExchange } = determine3DexDirection(snap);
@@ -102,6 +106,7 @@ describe("3-DEX direction determination", () => {
       longExch: "hyperliquid",
       shortExch: "pacifica",
       markPrice: 3000,
+      pacMarkPrice: 0, hlMarkPrice: 0, ltMarkPrice: 0,
     };
 
     const { longExchange, shortExchange } = determine3DexDirection(snap);
@@ -119,6 +124,7 @@ describe("3-DEX direction determination", () => {
       longExch: "pacifica",
       shortExch: "lighter",
       markPrice: 150,
+      pacMarkPrice: 0, hlMarkPrice: 0, ltMarkPrice: 0,
     };
 
     const { longExchange, shortExchange } = determine3DexDirection(snap);
@@ -156,6 +162,7 @@ describe("Funding accumulation tracking", () => {
       longExch: "hyperliquid",
       shortExch: "pacifica",
       markPrice: 60000,
+      pacMarkPrice: 0, hlMarkPrice: 0, ltMarkPrice: 0,
     };
 
     // 1 hour elapsed
@@ -190,6 +197,7 @@ describe("Funding accumulation tracking", () => {
       longExch: "lighter",
       shortExch: "pacifica",
       markPrice: 3000,
+      pacMarkPrice: 0, hlMarkPrice: 0, ltMarkPrice: 0,
     };
 
     const income = accumulateFunding(pos, snap, baseTime); // same time
@@ -218,6 +226,7 @@ describe("Funding accumulation tracking", () => {
       longExch: "hyperliquid",
       shortExch: "pacifica",
       markPrice: 60000,
+      pacMarkPrice: 0, hlMarkPrice: 0, ltMarkPrice: 0,
     };
 
     const income1h = accumulateFunding(pos, snap, baseTime + 3600_000);
@@ -248,6 +257,7 @@ describe("Funding accumulation tracking", () => {
       longExch: "hyperliquid",
       shortExch: "pacifica",
       markPrice: 60000,
+      pacMarkPrice: 0, hlMarkPrice: 0, ltMarkPrice: 0,
     };
 
     const income = accumulateFunding(pos, snap, baseTime + 3600_000);
@@ -387,6 +397,7 @@ describe("Spread reversal detection", () => {
       longExch: "pacifica",
       shortExch: "hyperliquid",
       markPrice: 60000,
+      pacMarkPrice: 0, hlMarkPrice: 0, ltMarkPrice: 0,
     };
     // Position: long HL, short PAC — but now HL hourly (0.0005) > PAC hourly (0.0001)
     const reversed = isSpreadReversed("hyperliquid", "pacifica", snap);
@@ -403,6 +414,7 @@ describe("Spread reversal detection", () => {
       longExch: "hyperliquid",
       shortExch: "pacifica",
       markPrice: 60000,
+      pacMarkPrice: 0, hlMarkPrice: 0, ltMarkPrice: 0,
     };
     // Position: long HL, short PAC — HL hourly (0.00005) < PAC hourly (0.001) → no reversal
     const reversed = isSpreadReversed("hyperliquid", "pacifica", snap);
@@ -419,6 +431,7 @@ describe("Spread reversal detection", () => {
       longExch: "pacifica",
       shortExch: "lighter",
       markPrice: 150,
+      pacMarkPrice: 0, hlMarkPrice: 0, ltMarkPrice: 0,
     };
     // Position: long LT, short PAC — LT hourly (0.0002) > PAC hourly (0.0001) → reversed
     const reversed = isSpreadReversed("lighter", "pacifica", snap);

@@ -2,6 +2,10 @@ import { Command } from "commander";
 import { makeTable, formatUsd, formatPercent, formatPnl, printJson, jsonOk } from "../utils.js";
 import chalk from "chalk";
 import { annualizeRate, computeAnnualSpread, toHourlyRate } from "../funding.js";
+import {
+  fetchPacificaPrices, fetchHyperliquidMeta,
+  fetchLighterOrderBookDetails, fetchLighterFundingRates,
+} from "../shared-api.js";
 import { scanDexArb, type DexArbPair } from "../dex-asset-map.js";
 
 interface FundingRate {
@@ -13,78 +17,45 @@ interface FundingRate {
 }
 
 async function fetchPacificaRates(): Promise<FundingRate[]> {
-  try {
-    const res = await fetch("https://api.pacifica.fi/api/v1/info/prices");
-    const json = await res.json();
-    const data = json.data ?? json;
-    if (!Array.isArray(data)) return [];
-    return data.map((p: Record<string, unknown>) => ({
-      exchange: "pacifica",
-      symbol: String(p.symbol ?? ""),
-      fundingRate: Number(p.funding ?? 0),
-      markPrice: Number(p.mark ?? 0),
-      nextFunding: Number(p.next_funding ?? 0),
-    }));
-  } catch {
-    return [];
-  }
+  const assets = await fetchPacificaPrices();
+  return assets.map(p => ({
+    exchange: "pacifica",
+    symbol: p.symbol,
+    fundingRate: p.funding,
+    markPrice: p.mark,
+    nextFunding: p.nextFunding ?? 0,
+  }));
 }
 
 async function fetchHyperliquidRates(): Promise<FundingRate[]> {
-  try {
-    const res = await fetch("https://api.hyperliquid.xyz/info", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ type: "metaAndAssetCtxs" }),
-    });
-    const json = await res.json();
-    const universe = json[0]?.universe ?? [];
-    const ctxs = json[1] ?? [];
-    return universe.map((asset: Record<string, unknown>, i: number) => {
-      const ctx = (ctxs[i] ?? {}) as Record<string, unknown>;
-      return {
-        exchange: "hyperliquid",
-        symbol: String(asset.name ?? ""),
-        fundingRate: Number(ctx.funding ?? 0),
-        markPrice: Number(ctx.markPx ?? 0),
-      };
-    });
-  } catch {
-    return [];
-  }
+  const assets = await fetchHyperliquidMeta();
+  return assets.map(a => ({
+    exchange: "hyperliquid",
+    symbol: a.symbol,
+    fundingRate: a.funding,
+    markPrice: a.markPx,
+  }));
 }
 
 async function fetchLighterRates(): Promise<FundingRate[]> {
-  const BASE = "https://mainnet.zklighter.elliot.ai";
   try {
-    const [detailsRes, fundingRes] = await Promise.all([
-      fetch(`${BASE}/api/v1/orderBookDetails`).then((r) => r.json()),
-      fetch(`${BASE}/api/v1/funding-rates`).then((r) => r.json()),
+    const [details, funding] = await Promise.all([
+      fetchLighterOrderBookDetails(),
+      fetchLighterFundingRates(),
     ]);
 
-    // Build market_id → {symbol, price} from orderBookDetails
-    const idToMeta = new Map<number, { symbol: string; price: number }>();
-    const details = (detailsRes as Record<string, unknown>).order_book_details ?? [];
-    for (const m of details as Array<Record<string, unknown>>) {
-      const marketId = Number(m.market_id);
-      const sym = String(m.symbol ?? "");
-      const price = Number(m.last_trade_price ?? 0);
-      if (sym) idToMeta.set(marketId, { symbol: sym, price });
-    }
+    const priceMap = new Map(details.map(d => [d.marketId, d.lastTradePrice]));
+    const symMap = new Map(details.map(d => [d.marketId, d.symbol]));
 
-    // Parse funding rates — response: { funding_rates: [{ market_id, symbol, rate, exchange }] }
     const rates: FundingRate[] = [];
-    const fundingList = (fundingRes as Record<string, unknown>).funding_rates ?? [];
-    for (const fr of fundingList as Array<Record<string, unknown>>) {
-      const marketId = Number(fr.market_id);
-      const symbol = String(fr.symbol ?? "") || idToMeta.get(marketId)?.symbol;
+    for (const fr of funding) {
+      const symbol = fr.symbol || symMap.get(fr.marketId);
       if (!symbol) continue;
-      const price = idToMeta.get(marketId)?.price ?? 0;
       rates.push({
         exchange: "lighter",
         symbol,
-        fundingRate: Number(fr.rate ?? fr.funding_rate ?? 0),
-        markPrice: price,
+        fundingRate: fr.rate,
+        markPrice: fr.markPrice || priceMap.get(fr.marketId) || 0,
       });
     }
     return rates;

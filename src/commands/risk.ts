@@ -67,7 +67,8 @@ export function registerRiskCommands(
         console.log(`  Overall Risk:         ${levelColor(assessment.level.toUpperCase())}`);
         console.log(`  Can Trade:            ${assessment.canTrade ? chalk.green("YES") : chalk.red("NO")}`);
         console.log(`  Total Equity:         $${formatUsd(assessment.metrics.totalEquity)}`);
-        console.log(`  Unrealized PnL:       ${assessment.metrics.totalUnrealizedPnl >= 0 ? chalk.green : chalk.red}($${formatUsd(Math.abs(assessment.metrics.totalUnrealizedPnl))})`);
+        console.log(`  Unrealized PnL:       ${(assessment.metrics.totalUnrealizedPnl >= 0 ? chalk.green : chalk.red)(`$${formatUsd(Math.abs(assessment.metrics.totalUnrealizedPnl))}`)}`);
+
         console.log(`  Total Exposure:       $${formatUsd(assessment.metrics.totalExposure)}`);
         console.log(`  Margin Utilization:   ${assessment.metrics.marginUtilization.toFixed(1)}%`);
         console.log(`  Positions:            ${assessment.metrics.positionCount}`);

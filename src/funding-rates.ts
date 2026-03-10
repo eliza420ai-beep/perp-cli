@@ -7,13 +7,13 @@
  */
 
 import { toHourlyRate, computeAnnualSpread, estimateHourlyFunding } from "./funding.js";
+import {
+  fetchPacificaPrices, fetchHyperliquidMeta,
+  fetchLighterOrderBookDetails, fetchLighterFundingRates as fetchLtFundingRates,
+} from "./shared-api.js";
 import { saveFundingSnapshot, getHistoricalAverages, type HistoricalAverages } from "./funding-history.js";
 
-// ── API URLs ──
-
-const PACIFICA_API = "https://api.pacifica.fi/api/v1/info/prices";
-const HYPERLIQUID_API = "https://api.hyperliquid.xyz/info";
-const LIGHTER_API = "https://mainnet.zklighter.elliot.ai";
+// ── API URLs (centralized in shared-api.ts) ──
 
 // ── Types ──
 
@@ -52,25 +52,21 @@ export const TOP_SYMBOLS = [
   "APT", "OP", "FIL", "AAVE", "MKR",
 ];
 
-// ── Fetchers ──
+// ── Fetchers (using shared-api.ts) ──
 
 async function fetchPacificaRates(): Promise<ExchangeFundingRate[]> {
   try {
-    const res = await fetch(PACIFICA_API);
-    const json = await res.json();
-    const data = (json as Record<string, unknown>).data ?? json;
-    if (!Array.isArray(data)) return [];
-    return data.map((p: Record<string, unknown>) => {
-      const rate = Number(p.funding ?? 0);
-      const hourly = toHourlyRate(rate, "pacifica");
+    const assets = await fetchPacificaPrices();
+    return assets.map(p => {
+      const hourly = toHourlyRate(p.funding, "pacifica");
       return {
         exchange: "pacifica" as const,
-        symbol: String(p.symbol ?? ""),
-        fundingRate: rate,
+        symbol: p.symbol,
+        fundingRate: p.funding,
         hourlyRate: hourly,
         annualizedPct: hourly * 24 * 365 * 100,
-        markPrice: Number(p.mark ?? 0),
-        nextFundingTime: p.next_funding ? Number(p.next_funding) : undefined,
+        markPrice: p.mark,
+        nextFundingTime: p.nextFunding,
       };
     });
   } catch {
@@ -80,25 +76,16 @@ async function fetchPacificaRates(): Promise<ExchangeFundingRate[]> {
 
 async function fetchHyperliquidRates(): Promise<ExchangeFundingRate[]> {
   try {
-    const res = await fetch(HYPERLIQUID_API, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ type: "metaAndAssetCtxs" }),
-    });
-    const json = await res.json() as unknown[];
-    const universe = ((json[0] ?? {}) as Record<string, unknown>).universe ?? [];
-    const ctxs = (json[1] ?? []) as Record<string, unknown>[];
-    return (universe as Record<string, unknown>[]).map((asset, i: number) => {
-      const ctx = (ctxs[i] ?? {}) as Record<string, unknown>;
-      const rate = Number(ctx.funding ?? 0);
-      const hourly = toHourlyRate(rate, "hyperliquid");
+    const assets = await fetchHyperliquidMeta();
+    return assets.map(a => {
+      const hourly = toHourlyRate(a.funding, "hyperliquid");
       return {
         exchange: "hyperliquid" as const,
-        symbol: String(asset.name ?? ""),
-        fundingRate: rate,
+        symbol: a.symbol,
+        fundingRate: a.funding,
         hourlyRate: hourly,
         annualizedPct: hourly * 24 * 365 * 100,
-        markPrice: Number(ctx.markPx ?? 0),
+        markPrice: a.markPx,
       };
     });
   } catch {
@@ -108,44 +95,27 @@ async function fetchHyperliquidRates(): Promise<ExchangeFundingRate[]> {
 
 async function fetchLighterRates(): Promise<ExchangeFundingRate[]> {
   try {
-    const [detailsRes, fundingRes] = await Promise.all([
-      fetch(`${LIGHTER_API}/api/v1/orderBookDetails`).then(r => r.json()),
-      fetch(`${LIGHTER_API}/api/v1/funding-rates`).then(r => r.json()),
+    const [details, funding] = await Promise.all([
+      fetchLighterOrderBookDetails(),
+      fetchLtFundingRates(),
     ]);
 
-    // Build market_id -> {symbol, price} from details
-    const idToMeta = new Map<number, { symbol: string; price: number }>();
-    const details = (detailsRes as Record<string, unknown>).order_book_details ?? [];
-    for (const m of details as Array<Record<string, unknown>>) {
-      idToMeta.set(Number(m.market_id), {
-        symbol: String(m.symbol ?? ""),
-        price: Number(m.last_trade_price ?? 0),
-      });
-    }
+    const priceMap = new Map(details.map(d => [d.marketId, d.lastTradePrice]));
+    const symMap = new Map(details.map(d => [d.marketId, d.symbol]));
 
-    const rates: ExchangeFundingRate[] = [];
-    const seenSymbols = new Set<string>();
-    const fundingList = (fundingRes as Record<string, unknown>).funding_rates ?? [];
-    for (const fr of fundingList as Array<Record<string, unknown>>) {
-      const marketId = Number(fr.market_id);
-      const symbol = String(fr.symbol ?? "") || idToMeta.get(marketId)?.symbol;
-      if (!symbol) continue;
-      // Deduplicate: keep only the first (latest) entry per symbol
-      if (seenSymbols.has(symbol)) continue;
-      seenSymbols.add(symbol);
-      const rate = Number(fr.rate ?? fr.funding_rate ?? 0);
+    return funding.map(fr => {
+      const symbol = fr.symbol || symMap.get(fr.marketId) || "";
+      const rate = fr.rate;
       const hourly = toHourlyRate(rate, "lighter");
-      const price = idToMeta.get(marketId)?.price ?? 0;
-      rates.push({
+      return {
         exchange: "lighter" as const,
         symbol,
         fundingRate: rate,
         hourlyRate: hourly,
         annualizedPct: hourly * 24 * 365 * 100,
-        markPrice: price,
-      });
-    }
-    return rates;
+        markPrice: fr.markPrice || priceMap.get(fr.marketId) || 0,
+      };
+    });
   } catch {
     return [];
   }
