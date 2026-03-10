@@ -6,6 +6,28 @@ import { computeExecutableSize } from "../liquidity.js";
 import { computeAnnualSpread, toHourlyRate } from "../funding.js";
 import { scanDexArb, type DexArbPair } from "../dex-asset-map.js";
 import { logExecution } from "../execution-log.js";
+import {
+  type SettleStrategy,
+  type ArbNotifyEvent,
+  getMinutesSinceSettlement,
+  aggressiveSettleBoost,
+  estimateFundingUntilSettlement,
+  computeBasisRisk,
+  notifyIfEnabled,
+} from "../arb-utils.js";
+import {
+  checkChainMargins, isCriticalMargin, shouldBlockEntries,
+  computeAutoSize,
+} from "../cross-chain-margin.js";
+import {
+  loadArbState,
+  saveArbState,
+  addPosition as persistAddPosition,
+  removePosition as persistRemovePosition,
+  updatePosition as persistUpdatePosition,
+  createInitialState,
+  type ArbPositionState,
+} from "../arb-state.js";
 
 interface ExchangeRate {
   exchange: string;
@@ -299,6 +321,11 @@ export function registerArbAutoCommands(
     .option("--no-reversal-exit", "Disable emergency exit on spread reversal")
     .option("--settle-aware", "Avoid entries near funding settlement (default: true)")
     .option("--no-settle-aware", "Disable settlement timing awareness")
+    .option("--min-margin <pct>", "Warn/block when margin ratio drops below this %", "30")
+    .option("--settle-strategy <mode>", "Settlement timing: block (default), aggressive, off", "block")
+    .option("--max-basis <pct>", "Max basis risk (mark price divergence %)", "3")
+    .option("--notify <url>", "Webhook URL for notifications (Discord/Telegram/generic)")
+    .option("--notify-events <events>", "Comma-separated events: entry,exit,reversal,margin,basis", "entry,exit,reversal,margin,basis")
     .option("--dry-run", "Simulate without executing trades")
     .option("--background", "Run in background (tmux)")
     .action(async (opts: {
@@ -306,6 +333,9 @@ export function registerArbAutoCommands(
       maxPositions: string; symbols?: string; interval: string;
       holdDays: string; bridgeCost: string;
       reversalExit?: boolean; settleAware?: boolean;
+      minMargin: string;
+      settleStrategy: string; maxBasis: string;
+      notify?: string; notifyEvents: string;
       dryRun?: boolean; background?: boolean;
     }) => {
       if (opts.background) {
@@ -318,6 +348,7 @@ export function registerArbAutoCommands(
           `--interval`, opts.interval,
           `--hold-days`, opts.holdDays,
           `--bridge-cost`, opts.bridgeCost,
+          `--min-margin`, opts.minMargin,
           ...(opts.symbols ? [`--symbols`, opts.symbols] : []),
           ...(opts.dryRun ? [`--dry-run`] : []),
           ...(opts.reversalExit === false ? [`--no-reversal-exit`] : []),
@@ -341,29 +372,90 @@ export function registerArbAutoCommands(
 
       const minSpread = parseFloat(opts.minSpread);
       const closeSpread = parseFloat(opts.closeSpread);
-      const sizeUsd = parseFloat(opts.size);
+      const sizeIsAuto = opts.size.toLowerCase() === "auto";
+      const sizeUsd = sizeIsAuto ? 0 : parseFloat(opts.size);
       const maxPositions = parseInt(opts.maxPositions);
       const intervalMs = parseInt(opts.interval) * 1000;
       const holdDays = parseFloat(opts.holdDays);
       const bridgeCostUsd = parseFloat(opts.bridgeCost);
       const reversalExitEnabled = opts.reversalExit !== false;
       const settleAwareEnabled = opts.settleAware !== false;
+      const settleStrategy = (opts.settleStrategy || "block") as SettleStrategy;
+      const maxBasisPct = parseFloat(opts.maxBasis);
+      const webhookUrl = opts.notify;
+      const notifyEvents: ArbNotifyEvent[] = opts.notifyEvents
+        .split(",").map(e => e.trim()).filter(Boolean) as ArbNotifyEvent[];
+      const minMarginPct = parseFloat(opts.minMargin);
       const filterSymbols = opts.symbols?.split(",").map(s => s.trim().toUpperCase());
       const dryRun = !!opts.dryRun || process.argv.includes("--dry-run");
 
       const openPositions: ArbPosition[] = [];
+      // Track which exchanges have low margin (block entries)
+      const blockedExchanges = new Set<string>();
+
+      // -- State Persistence: Initialize or recover --
+      const daemonConfig = {
+        minSpread,
+        closeSpread,
+        size: (typeof sizeIsAuto !== "undefined" && sizeIsAuto ? "auto" : sizeUsd) as number | "auto",
+        holdDays,
+        bridgeCost: bridgeCostUsd,
+        maxPositions,
+        settleStrategy: settleAwareEnabled ? "aware" : "disabled",
+      };
+      let daemonState = loadArbState();
+      if (daemonState && daemonState.positions.length > 0) {
+        // Crash recovery: restore positions from persisted state
+        for (const persisted of daemonState.positions) {
+          openPositions.push({
+            symbol: persisted.symbol,
+            longExchange: persisted.longExchange,
+            shortExchange: persisted.shortExchange,
+            size: String(persisted.longSize),
+            entrySpread: persisted.entrySpread,
+            entryTime: persisted.entryTime,
+            entryMarkPrice: persisted.entryLongPrice,
+            accumulatedFundingUsd: persisted.accumulatedFunding,
+            lastCheckTime: new Date(persisted.lastCheckTime).getTime(),
+          });
+        }
+        daemonState.lastStartTime = new Date().toISOString();
+        saveArbState(daemonState);
+        if (!isJson()) {
+          console.log(chalk.yellow(`  Recovered ${openPositions.length} position(s) from previous session.`));
+        }
+      } else {
+        daemonState = createInitialState(daemonConfig);
+        saveArbState(daemonState);
+      }
+
+      // SIGINT handler: save final state before exit
+      const handleSigint = () => {
+        const finalState = loadArbState();
+        if (finalState) {
+          finalState.lastScanTime = new Date().toISOString();
+          saveArbState(finalState);
+        }
+        if (!isJson()) console.log(chalk.yellow("\n  Daemon stopped. State saved.\n"));
+        process.exit(0);
+      };
+      process.on("SIGINT", handleSigint);
+
 
       if (!isJson()) {
         console.log(chalk.cyan.bold("\n  Funding Rate Arb Bot\n"));
         console.log(`  Mode:          ${dryRun ? chalk.yellow("DRY RUN") : chalk.green("LIVE")}`);
         console.log(`  Enter spread:  >= ${minSpread}% annual (net, after fees)`);
         console.log(`  Close spread:  <= ${closeSpread}% annual`);
-        console.log(`  Size per leg:  $${sizeUsd}`);
+        console.log(`  Size per leg:  ${sizeIsAuto ? chalk.cyan("auto (dynamic)") : `$${sizeUsd}`}`);
         console.log(`  Max positions: ${maxPositions}`);
         console.log(`  Hold period:   ${holdDays} days (cost amortization)`);
         console.log(`  Bridge cost:   $${bridgeCostUsd} per transfer`);
+        console.log(`  Min margin:    ${minMarginPct}% (block entries below this)`);
+        console.log(`  Max basis:     ${maxBasisPct}% (warn on price divergence)`);
         console.log(`  Reversal exit: ${reversalExitEnabled ? chalk.green("ON") : chalk.yellow("OFF")}`);
-        console.log(`  Settle aware:  ${settleAwareEnabled ? chalk.green("ON") : chalk.yellow("OFF")}`);
+        console.log(`  Settle strat:  ${settleStrategy === "aggressive" ? chalk.cyan("AGGRESSIVE") : settleStrategy === "off" ? chalk.yellow("OFF") : chalk.green("BLOCK")}`);
+        console.log(`  Notifications: ${webhookUrl ? chalk.green("ON") : chalk.gray("OFF")}${webhookUrl ? ` (${notifyEvents.join(",")})` : ""}`);
         console.log(`  Symbols:       ${filterSymbols?.join(", ") || "all"}`);
         console.log(`  Interval:      ${opts.interval}s`);
         console.log(chalk.gray("\n  Monitoring... (Ctrl+C to stop)\n"));
@@ -398,7 +490,34 @@ export function registerArbAutoCommands(
             if (!shouldClose && reversalExitEnabled && isSpreadReversed(pos.longExchange, pos.shortExchange, current)) {
               shouldClose = true;
               closeReason = "REVERSAL DETECTED — long exchange now has higher rate than short";
+              await notifyIfEnabled(webhookUrl, notifyEvents, "reversal", {
+                symbol: pos.symbol, longExchange: pos.longExchange, shortExchange: pos.shortExchange,
+              });
             }
+
+            // Check basis risk (mark price divergence)
+            try {
+              const bLA = await getAdapterForExchange(pos.longExchange);
+              const bSA = await getAdapterForExchange(pos.shortExchange);
+              const [bLM, bSM2] = await Promise.all([bLA.getMarkets(), bSA.getMarkets()]);
+              const bLMkt = bLM.find(m => m.symbol.replace("-PERP", "").toUpperCase() === pos.symbol.toUpperCase());
+              const bSMkt = bSM2.find(m => m.symbol.replace("-PERP", "").toUpperCase() === pos.symbol.toUpperCase());
+              if (bLMkt && bSMkt) {
+                const bLP = Number(bLMkt.markPrice), bSP = Number(bSMkt.markPrice);
+                const basis = computeBasisRisk(bLP, bSP, maxBasisPct);
+                if (basis.warning) {
+                  const bExA = (e: string) => e === "pacifica" ? "PAC" : e === "hyperliquid" ? "HL" : "LT";
+                  console.log(chalk.yellow(
+                    `  ${now} BASIS RISK ${pos.symbol}: Long ${bExA(pos.longExchange)} $${bLP.toFixed(4)} / ` +
+                    `Short ${bExA(pos.shortExchange)} $${bSP.toFixed(4)} | Divergence: ${basis.divergencePct.toFixed(1)}%`
+                  ));
+                  await notifyIfEnabled(webhookUrl, notifyEvents, "basis", {
+                    symbol: pos.symbol, longExchange: pos.longExchange, shortExchange: pos.shortExchange,
+                    divergencePct: basis.divergencePct,
+                  });
+                }
+              }
+            } catch { /* basis check failed */ }
 
             if (shouldClose) {
               console.log(chalk.yellow(`  ${now} CLOSE ${pos.symbol} — ${closeReason}`));
@@ -417,6 +536,11 @@ export function registerArbAutoCommands(
                     meta: { longExchange: pos.longExchange, shortExchange: pos.shortExchange, currentSpread, reason: closeReason },
                   });
                   console.log(chalk.green(`  ${now} CLOSED ${pos.symbol} — both legs`));
+                  await notifyIfEnabled(webhookUrl, notifyEvents, "exit", {
+                    symbol: pos.symbol, longExchange: pos.longExchange, shortExchange: pos.shortExchange,
+                    pnl: pos.accumulatedFundingUsd,
+                    duration: `${Math.round((Date.now() - new Date(pos.entryTime).getTime()) / 3600000)}h`,
+                  });
                 } catch (err) {
                   logExecution({
                     type: "arb_close", exchange: `${pos.longExchange}+${pos.shortExchange}`,
@@ -433,18 +557,60 @@ export function registerArbAutoCommands(
             }
           }
 
-          // Log next settlement times
-          if (!isJson() && settleAwareEnabled) {
+          // Log next settlement times and funding estimation
+          if (!isJson() && settleStrategy !== "off") {
             const nowDate = new Date();
             const exAbbr = (e: string) => e === "pacifica" ? "PAC" : e === "hyperliquid" ? "HL" : "LT";
             const nextHL = getNextSettlement("hyperliquid", nowDate);
             const nextPAC = getNextSettlement("pacifica", nowDate);
             const nextLT = getNextSettlement("lighter", nowDate);
             const fmtMin = (d: Date) => Math.max(0, Math.round((d.getTime() - nowDate.getTime()) / 60000));
+            const hoursUntilPAC = (nextPAC.getTime() - nowDate.getTime()) / 3600000;
+            const hUTC = nextPAC.getUTCHours().toString().padStart(2, "0");
             console.log(chalk.gray(
               `  ${now} Next settlements: HL ${fmtMin(nextHL)}m | PAC ${fmtMin(nextPAC)}m | LT ${fmtMin(nextLT)}m`
             ));
+            for (const fPos of openPositions) {
+              const fSnap = filtered.find(s => s.symbol === fPos.symbol);
+              if (!fSnap) continue;
+              const fRateFor = (e: string) => e === "pacifica" ? fSnap.pacRate : e === "hyperliquid" ? fSnap.hlRate : fSnap.ltRate;
+              const fHlHourly = toHourlyRate(fRateFor("hyperliquid"), "hyperliquid");
+              const fPacRate8h = fRateFor("pacifica");
+              const fNotional = parseFloat(fPos.size) * fSnap.markPrice;
+              const fEst = estimateFundingUntilSettlement(fHlHourly, fPacRate8h, fNotional, hoursUntilPAC);
+              console.log(chalk.gray(
+                `  ${now} ${fPos.symbol} Next PAC: ${hUTC}:00 UTC (${hoursUntilPAC.toFixed(1)}h) | ` +
+                `HL cum: ~$${fEst.hlCumulative.toFixed(4)} | PAC pmt: ~$${fEst.pacPayment.toFixed(4)} | ` +
+                `Net: ~$${fEst.netFunding.toFixed(4)}`
+              ));
+            }
           }
+
+          // ── Cross-chain margin monitoring ──
+          blockedExchanges.clear();
+          try {
+            const exchangeNames = ["hyperliquid", "lighter", "pacifica"];
+            const adaptersMap = new Map<string, ExchangeAdapter>();
+            for (const name of exchangeNames) {
+              try { adaptersMap.set(name, await getAdapterForExchange(name)); } catch { /* skip */ }
+            }
+            if (adaptersMap.size > 0) {
+              const marginStatuses = await checkChainMargins(adaptersMap, minMarginPct);
+              for (const ms of marginStatuses) {
+                if (isCriticalMargin(ms)) {
+                  console.log(chalk.red.bold(
+                    `  ${now} EMERGENCY: ${ms.exchange} margin ratio ${ms.marginRatio.toFixed(1)}% — CRITICAL (below 15%)`
+                  ));
+                  blockedExchanges.add(ms.exchange);
+                } else if (shouldBlockEntries(ms, minMarginPct)) {
+                  console.log(chalk.yellow(
+                    `  ${now} WARNING: ${ms.exchange} margin ${ms.marginRatio.toFixed(1)}% below ${minMarginPct}% — blocking new entries`
+                  ));
+                  blockedExchanges.add(ms.exchange);
+                }
+              }
+            }
+          } catch { /* margin check failed, continue without blocking */ }
 
           // Check for entry conditions
           if (openPositions.length < maxPositions) {
@@ -458,21 +624,42 @@ export function registerArbAutoCommands(
               const longExchange = snap.longExch;
               const shortExchange = snap.shortExch;
 
+              // Block entries if either exchange has low margin
+              if (blockedExchanges.has(longExchange) || blockedExchanges.has(shortExchange)) {
+                if (!isJson()) {
+                  console.log(chalk.gray(
+                    `  ${now} SKIP ${snap.symbol}: margin too low on ${blockedExchanges.has(longExchange) ? longExchange : shortExchange}`
+                  ));
+                }
+                continue;
+              }
+
               // Compute net spread after fees and bridge costs
               const roundTripCost = computeRoundTripCostPct(longExchange, shortExchange);
-              const netSpread = computeNetSpread(grossSpread, holdDays, roundTripCost, bridgeCostUsd, sizeUsd);
+              const effectiveSizeUsd = sizeIsAuto ? 100 : sizeUsd; // Use $100 for net spread calc when auto
+              const netSpread = computeNetSpread(grossSpread, holdDays, roundTripCost, bridgeCostUsd, effectiveSizeUsd);
 
               // --min-spread now compares against NET spread
               if (netSpread < minSpread) continue;
 
-              // Settlement timing check
-              if (settleAwareEnabled) {
+              // Settlement timing check with strategy
+              if (settleStrategy === "block") {
                 const settlCheck = isNearSettlement(longExchange, shortExchange);
                 if (settlCheck.blocked) {
                   console.log(chalk.gray(
                     `  ${now} SKIP ${snap.symbol}: ${settlCheck.minutesUntil?.toFixed(1)}m before ${settlCheck.exchange} settlement`
                   ));
                   continue;
+                }
+              }
+              // In aggressive mode, boost score for post-settlement entries
+              let settleBoostMultiplier = 1.0;
+              if (settleStrategy === "aggressive") {
+                settleBoostMultiplier = aggressiveSettleBoost(longExchange, shortExchange, 10, new Date());
+                if (settleBoostMultiplier > 1.0) {
+                  console.log(chalk.cyan(
+                    `  ${now} BOOST ${snap.symbol}: post-settlement ${((settleBoostMultiplier - 1) * 100).toFixed(0)}% score boost`
+                  ));
                 }
               }
 
@@ -489,7 +676,25 @@ export function registerArbAutoCommands(
                 console.error(chalk.red(`  ${now} SKIP ${snap.symbol}: no mark price available`));
                 continue;
               }
-              const sizeInAsset = (sizeUsd / snap.markPrice).toFixed(4);
+
+              // Dynamic sizing: compute auto size if --size auto
+              let actualSizeUsd = sizeUsd;
+              if (sizeIsAuto) {
+                try {
+                  const longAdapter = await getAdapterForExchange(longExchange);
+                  const shortAdapter = await getAdapterForExchange(shortExchange);
+                  actualSizeUsd = await computeAutoSize(longAdapter, shortAdapter, snap.symbol, 0.3);
+                  if (actualSizeUsd <= 0) {
+                    console.log(chalk.gray(`  ${now} SKIP ${snap.symbol}: auto-size returned $0 (insufficient depth/margin)`));
+                    continue;
+                  }
+                  console.log(chalk.gray(`  ${now} Auto-size ${snap.symbol}: $${actualSizeUsd}`));
+                } catch (err) {
+                  console.log(chalk.gray(`  ${now} SKIP ${snap.symbol}: auto-size failed — ${err instanceof Error ? err.message : err}`));
+                  continue;
+                }
+              }
+              const sizeInAsset = (actualSizeUsd / snap.markPrice).toFixed(4);
 
               if (!dryRun) {
                 try {
@@ -507,7 +712,11 @@ export function registerArbAutoCommands(
                     status: "success", dryRun: false,
                     meta: { longExchange, shortExchange, grossSpread, netSpread, roundTripCost, markPrice: snap.markPrice },
                   });
-                  console.log(chalk.green(`  ${now} FILLED ${snap.symbol} — both legs @ ${sizeInAsset} units ($${sizeUsd} / $${snap.markPrice.toFixed(2)})`));
+                  console.log(chalk.green(`  ${now} FILLED ${snap.symbol} — both legs @ ${sizeInAsset} units ($${actualSizeUsd} / $${snap.markPrice.toFixed(2)})`));
+                  await notifyIfEnabled(webhookUrl, notifyEvents, "entry", {
+                    symbol: snap.symbol, longExchange, shortExchange,
+                    size: actualSizeUsd, netSpread,
+                  });
                 } catch (err) {
                   logExecution({
                     type: "arb_entry", exchange: `${longExchange}+${shortExchange}`,

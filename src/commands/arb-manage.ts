@@ -4,6 +4,10 @@ import { makeTable, formatUsd, formatPnl, printJson, jsonOk } from "../utils.js"
 import type { ExchangeAdapter, ExchangePosition } from "../exchanges/interface.js";
 import { readExecutionLog, logExecution, type ExecutionRecord } from "../execution-log.js";
 import { toHourlyRate, computeAnnualSpread } from "../funding.js";
+import { computeBasisRisk } from "../arb-utils.js";
+import { fetchAllBalances, computeRebalancePlan } from "../rebalance.js";
+import { EXCHANGE_TO_CHAIN, getBestQuote } from "../bridge-engine.js";
+import { computeEnhancedStats, type ArbTradeForStats } from "../arb-history-stats.js";
 
 // ── Types ──
 
@@ -310,6 +314,14 @@ export function registerArbManageCommands(
         const holdStr = p.holdDuration ?? "-";
         const avgNotional = (p.longPosition.notionalUsd + p.shortPosition.notionalUsd) / 2;
 
+        // Compute basis risk from mark prices
+        const basis = computeBasisRisk(p.longPosition.markPrice, p.shortPosition.markPrice);
+        const basisStr = basis.divergencePct > 0
+          ? (basis.warning
+            ? chalk.red(`${basis.divergencePct.toFixed(1)}%`)
+            : chalk.gray(`${basis.divergencePct.toFixed(1)}%`))
+          : chalk.gray("-");
+
         return [
           chalk.white.bold(p.symbol),
           chalk.green(p.longExchange),
@@ -320,13 +332,14 @@ export function registerArbManageCommands(
           formatPnl(p.unrealizedPnl),
           chalk.yellow(`$${p.estimatedFundingIncome.toFixed(4)}`),
           `${entrySpreadStr} -> ${spreadStr}`,
+          basisStr,
           holdStr,
           formatPnl(p.netPnl),
         ];
       });
 
       console.log(makeTable(
-        ["Symbol", "Long", "Short", "Size", "Entry", "Mark", "uPnL", "Funding", "Spread", "Hold", "Net PnL"],
+        ["Symbol", "Long", "Short", "Size", "Entry", "Mark", "uPnL", "Funding", "Spread", "Basis", "Hold", "Net PnL"],
         rows,
       ));
 
@@ -551,6 +564,12 @@ export function registerArbManageCommands(
             totalNetPnl: 0,
             bestTrade: null,
             worstTrade: null,
+            avgEntrySpread: 0,
+            avgExitSpread: 0,
+            avgSpreadDecay: 0,
+            byExchangePair: [],
+            byTimeOfDay: [],
+            optimalHoldTime: null,
           },
           period: periodDays,
         };
@@ -676,6 +695,20 @@ export function registerArbManageCommands(
         ? completedTrades.reduce((worst, t) => t.netReturn < worst.netReturn ? t : worst)
         : null;
 
+      // Compute enhanced analytics
+      const statsInput: ArbTradeForStats[] = trades.map(t => ({
+        symbol: t.symbol,
+        exchanges: t.exchanges,
+        entryDate: t.entryDate,
+        exitDate: t.exitDate,
+        holdDurationMs: t.holdDurationMs,
+        entrySpread: t.entrySpread,
+        exitSpread: t.exitSpread,
+        netReturn: t.netReturn,
+        status: t.status,
+      }));
+      const enhanced = computeEnhancedStats(statsInput);
+
       const summary = {
         totalTrades: trades.length,
         completedTrades: completedTrades.length,
@@ -689,6 +722,12 @@ export function registerArbManageCommands(
         totalFees,
         bestTrade: bestTrade ? { symbol: bestTrade.symbol, netReturn: bestTrade.netReturn } : null,
         worstTrade: worstTrade ? { symbol: worstTrade.symbol, netReturn: worstTrade.netReturn } : null,
+        avgEntrySpread: enhanced.avgEntrySpread,
+        avgExitSpread: enhanced.avgExitSpread,
+        avgSpreadDecay: enhanced.avgSpreadDecay,
+        byExchangePair: enhanced.byExchangePair,
+        byTimeOfDay: enhanced.byTimeOfDay,
+        optimalHoldTime: enhanced.optimalHoldTime,
       };
 
       if (isJson()) {
@@ -743,6 +782,252 @@ export function registerArbManageCommands(
       if (summary.worstTrade) {
         console.log(`    Worst trade:     ${summary.worstTrade.symbol} ${formatPnl(summary.worstTrade.netReturn)}`);
       }
+
+      // ── Exchange Pair Performance ──
+      if (enhanced.byExchangePair.length > 0) {
+        console.log(chalk.cyan.bold("\n  Exchange Pair Performance\n"));
+        const pairRows = enhanced.byExchangePair.map(p => [
+          chalk.white.bold(p.pair),
+          String(p.trades),
+          `${p.winRate.toFixed(0)}%`,
+          formatPnl(p.avgNetPnl),
+          p.avgHoldTime,
+        ]);
+        console.log(makeTable(
+          ["Pair", "Trades", "Win%", "Avg PnL", "Avg Hold"],
+          pairRows,
+        ));
+      }
+
+      // ── Time of Day Performance ──
+      if (enhanced.byTimeOfDay.length > 0) {
+        console.log(chalk.cyan.bold("\n  Time of Day Performance\n"));
+        const todRows = enhanced.byTimeOfDay.map(b => [
+          chalk.white(b.bucket),
+          String(b.trades),
+          `${b.winRate.toFixed(0)}%`,
+          formatPnl(b.avgNetPnl),
+        ]);
+        console.log(makeTable(
+          ["UTC", "Trades", "Win%", "Avg PnL"],
+          todRows,
+        ));
+      }
+
+      // ── Spread Decay & Optimal Hold ──
+      if (enhanced.optimalHoldTime) {
+        console.log(`    Optimal hold time: ~${enhanced.optimalHoldTime} (median of winning trades)`);
+      }
+      if (enhanced.avgEntrySpread > 0 && enhanced.avgExitSpread >= 0) {
+        console.log(`    Avg spread decay: ${enhanced.avgEntrySpread.toFixed(1)}% -> ${enhanced.avgExitSpread.toFixed(1)}% over avg ${summary.avgHoldTime ?? "-"}`);
+      }
       console.log();
+    });
+
+  // ── arb rebalance ──
+
+  arb
+    .command("rebalance")
+    .description("Cross-exchange balance rebalancing for arb")
+    .option("--check", "Show current balance distribution")
+    .option("--target <ratio>", "Target distribution ratio (e.g., '50:50' for 2 exchanges, '33:33:33' for 3)")
+    .option("--amount <usd>", "Total amount to rebalance")
+    .option("--dry-run", "Show plan without executing")
+    .option("--exchanges <list>", "Comma-separated exchanges", "lighter,pacifica,hyperliquid")
+    .action(async (opts: {
+      check?: boolean; target?: string; amount?: string;
+      dryRun?: boolean; exchanges: string;
+    }) => {
+      const exchangeNames = opts.exchanges.split(",").map(e => e.trim());
+      const adapters = new Map<string, ExchangeAdapter>();
+
+      for (const name of exchangeNames) {
+        try {
+          adapters.set(name, await getAdapterForExchange(name));
+        } catch { /* skip unavailable */ }
+      }
+
+      if (adapters.size === 0) {
+        if (isJson()) return printJson(jsonOk({ error: "No exchanges available" }));
+        console.error(chalk.red("\n  No exchanges available. Check credentials.\n"));
+        return;
+      }
+
+      // Default to --check if no action specified
+      if (!opts.target && !opts.check) {
+        opts.check = true;
+      }
+
+      const snapshots = await fetchAllBalances(adapters);
+      const totalEquity = snapshots.reduce((s, e) => s + e.equity, 0);
+      const totalAvailable = snapshots.reduce((s, e) => s + e.available, 0);
+
+      const exAbbr = (e: string) => e === "pacifica" ? "PAC" : e === "hyperliquid" ? "HL" : e === "lighter" ? "LT" : e.toUpperCase();
+      const exChain = (e: string) => e === "pacifica" ? "Solana" : e === "hyperliquid" ? "Hyperliquid" : e === "lighter" ? "Arbitrum" : "unknown";
+
+      if (opts.check) {
+        // Show current balance distribution
+        if (isJson()) {
+          return printJson(jsonOk({
+            balances: snapshots.map(s => ({
+              exchange: s.exchange,
+              abbr: exAbbr(s.exchange),
+              chain: exChain(s.exchange),
+              equity: s.equity,
+              available: s.available,
+              marginUsed: s.marginUsed,
+              unrealizedPnl: s.unrealizedPnl,
+              allocationPct: totalEquity > 0 ? (s.equity / totalEquity) * 100 : 0,
+            })),
+            totalEquity,
+            totalAvailable,
+          }));
+        }
+
+        console.log(chalk.cyan("\n  Cross-Exchange Balance Distribution\n"));
+
+        const rows = snapshots.map(s => {
+          const pct = totalEquity > 0 ? ((s.equity / totalEquity) * 100).toFixed(1) : "0.0";
+          return [
+            chalk.white.bold(exAbbr(s.exchange).padEnd(4)),
+            chalk.gray(exChain(s.exchange).padEnd(12)),
+            `$${formatUsd(s.equity)}`,
+            `$${formatUsd(s.available)}`,
+            `$${formatUsd(s.marginUsed)}`,
+            s.unrealizedPnl >= 0
+              ? chalk.green(`+$${formatUsd(s.unrealizedPnl)}`)
+              : chalk.red(`-$${formatUsd(Math.abs(s.unrealizedPnl))}`),
+            `${pct}%`,
+          ];
+        });
+
+        console.log(makeTable(["Exch", "Chain", "Equity", "Available", "Margin", "uPnL", "Alloc%"], rows));
+        console.log(chalk.cyan.bold("  Totals"));
+        console.log(`  Total Equity:    $${formatUsd(totalEquity)}`);
+        console.log(`  Total Available: $${formatUsd(totalAvailable)}`);
+        console.log(`  Exchanges:       ${snapshots.length}\n`);
+        return;
+      }
+
+      // Parse target ratios
+      if (!opts.target) {
+        console.error(chalk.red("  --target required (e.g., '50:50' or '33:33:33')"));
+        return;
+      }
+
+      const ratios = opts.target.split(":").map(Number);
+      if (ratios.length !== snapshots.length || ratios.some(isNaN)) {
+        console.error(chalk.red(`  Target ratio must have ${snapshots.length} parts (one per exchange), got '${opts.target}'`));
+        return;
+      }
+
+      const ratioSum = ratios.reduce((a, b) => a + b, 0);
+      const weights: Record<string, number> = {};
+      snapshots.forEach((s, i) => {
+        weights[s.exchange] = ratios[i] / ratioSum;
+      });
+
+      // Compute plan
+      const plan = computeRebalancePlan(snapshots, { weights, minMove: 10, reserve: 10 });
+
+      if (plan.moves.length === 0) {
+        if (isJson()) return printJson(jsonOk({ status: "balanced", moves: [], snapshots }));
+        console.log(chalk.green("\n  Already balanced -- no moves needed.\n"));
+        return;
+      }
+
+      // If --amount specified, scale moves proportionally
+      let moves = plan.moves;
+      if (opts.amount) {
+        const requestedAmount = parseFloat(opts.amount);
+        const totalMoveAmount = moves.reduce((s, m) => s + m.amount, 0);
+        if (totalMoveAmount > 0) {
+          const scale = Math.min(1, requestedAmount / totalMoveAmount);
+          moves = moves.map(m => ({ ...m, amount: Math.floor(m.amount * scale) })).filter(m => m.amount >= 10);
+        }
+      }
+
+      // Get bridge route info for each move
+      const moveDetails = await Promise.all(moves.map(async (m) => {
+        const srcChain = EXCHANGE_TO_CHAIN[m.from] ?? "unknown";
+        const dstChain = EXCHANGE_TO_CHAIN[m.to] ?? "unknown";
+        let bridgeFee = 0;
+        let bridgeProvider = "same-chain";
+        let bridgeTime = "instant";
+
+        if (srcChain !== dstChain && srcChain !== "unknown" && dstChain !== "unknown") {
+          try {
+            const quote = await getBestQuote(srcChain, dstChain, m.amount, "0x0000000000000000000000000000000000000000", "0x0000000000000000000000000000000000000000");
+            bridgeFee = quote.fee;
+            bridgeProvider = quote.provider;
+            bridgeTime = `~${Math.ceil(quote.estimatedTime / 60)}min`;
+          } catch {
+            bridgeFee = 0.5; // fallback estimate
+            bridgeProvider = "cctp";
+            bridgeTime = "~3min";
+          }
+        }
+
+        return {
+          ...m,
+          srcChain,
+          dstChain,
+          bridgeFee,
+          bridgeProvider,
+          bridgeTime,
+        };
+      }));
+
+      if (isJson()) {
+        return printJson(jsonOk({
+          status: opts.dryRun ? "dry_run" : "planned",
+          target: weights,
+          moves: moveDetails,
+          snapshots,
+          totalEquity,
+        }));
+      }
+
+      console.log(chalk.cyan("\n  Rebalance Plan\n"));
+
+      // Show current vs target
+      const stateRows = snapshots.map(s => {
+        const targetPct = (weights[s.exchange] * 100).toFixed(1);
+        const currentPct = totalEquity > 0 ? ((s.equity / totalEquity) * 100).toFixed(1) : "0.0";
+        const targetUsd = totalAvailable * weights[s.exchange];
+        const diff = s.available - targetUsd;
+        const diffStr = diff >= 0
+          ? chalk.green(`+$${formatUsd(diff)}`)
+          : chalk.red(`-$${formatUsd(Math.abs(diff))}`);
+        return [
+          chalk.white.bold(exAbbr(s.exchange)),
+          `$${formatUsd(s.available)}`,
+          `${currentPct}%`,
+          `$${formatUsd(targetUsd)}`,
+          `${targetPct}%`,
+          diffStr,
+        ];
+      });
+
+      console.log(makeTable(["Exch", "Available", "Current%", "Target$", "Target%", "Diff"], stateRows));
+
+      // Show moves
+      console.log(chalk.cyan.bold("\n  Transfers\n"));
+      for (let i = 0; i < moveDetails.length; i++) {
+        const m = moveDetails[i];
+        console.log(chalk.white.bold(`  Move ${i + 1}: $${m.amount} ${exAbbr(m.from)} -> ${exAbbr(m.to)}`));
+        console.log(chalk.gray(`    Route: ${m.srcChain} -> ${m.dstChain} via ${m.bridgeProvider}`));
+        console.log(chalk.gray(`    Fee: ~$${m.bridgeFee.toFixed(2)} | Time: ${m.bridgeTime}`));
+        console.log();
+      }
+
+      const totalFees = moveDetails.reduce((s, m) => s + m.bridgeFee, 0);
+      console.log(chalk.gray(`  Total bridge fees: ~$${totalFees.toFixed(2)}`));
+
+      if (opts.dryRun) {
+        console.log(chalk.yellow("\n  [DRY RUN] No transfers executed.\n"));
+      } else {
+        console.log(chalk.yellow("\n  To execute, use: perp rebalance execute --auto-bridge\n"));
+      }
     });
 }
