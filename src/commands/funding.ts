@@ -340,7 +340,7 @@ function printSnapshotTable(snapshot: FundingRateSnapshot): void {
   ));
 
   console.log(chalk.gray(`\n  ${snapshot.symbols.length} symbols compared across exchanges.`));
-  console.log(chalk.gray(`  Rates: PAC/LT = per 8h | HL = per 1h. Spread is normalized.`));
+  console.log(chalk.gray(`  Rates: All exchanges per 1h. Spread is normalized.`));
   console.log(chalk.gray(`  Avg columns show best exchange's historical hourly rate annualized.\n`));
 }
 

@@ -7,12 +7,12 @@ describe("Funding Rate Normalization", () => {
       expect(toHourlyRate(0.001, "hyperliquid")).toBeCloseTo(0.001);
     });
 
-    it("should divide Pacifica 8h rate by 8", () => {
-      expect(toHourlyRate(0.008, "pacifica")).toBeCloseTo(0.001);
+    it("should return Pacifica rate as-is (already hourly)", () => {
+      expect(toHourlyRate(0.001, "pacifica")).toBeCloseTo(0.001);
     });
 
-    it("should divide Lighter 8h rate by 8", () => {
-      expect(toHourlyRate(0.008, "lighter")).toBeCloseTo(0.001);
+    it("should return Lighter rate as-is (already hourly)", () => {
+      expect(toHourlyRate(0.001, "lighter")).toBeCloseTo(0.001);
     });
   });
 
@@ -23,9 +23,9 @@ describe("Funding Rate Normalization", () => {
       expect(result).toBeCloseTo(87.6, 0);
     });
 
-    it("should annualize Pacifica 8h rate correctly", () => {
-      // 0.08% per 8h = 0.01% per hour * 8760 = 87.6%
-      const result = annualizeRate(0.0008, "pacifica");
+    it("should annualize Pacifica hourly rate correctly", () => {
+      // 0.01% per hour * 8760 = 87.6%
+      const result = annualizeRate(0.0001, "pacifica");
       expect(result).toBeCloseTo(87.6, 0);
     });
 
@@ -40,8 +40,8 @@ describe("Funding Rate Normalization", () => {
 
   describe("computeAnnualSpread", () => {
     it("should compute spread between different exchanges", () => {
-      // HL: 0.01% hourly, PAC: 0.001% per 8h = 0.000125% hourly
-      // Spread = |0.01% - 0.000125%| * 8760 = ~86.5%
+      // HL: 0.01% hourly, PAC: 0.001% hourly
+      // Spread = |0.0001 - 0.00001| * 8760 * 100 = ~78.84%
       const spread = computeAnnualSpread(0.0001, "hyperliquid", 0.00001, "pacifica");
       expect(spread).toBeGreaterThan(0);
     });
@@ -56,9 +56,9 @@ describe("Funding Rate Normalization", () => {
       expect(spread).toBeCloseTo(0, 1);
     });
 
-    it("should normalize before computing (HL hourly vs PAC 8h)", () => {
-      // Same effective rate: HL 0.001 hourly = PAC 0.008 per 8h
-      const spread = computeAnnualSpread(0.001, "hyperliquid", 0.008, "pacifica");
+    it("should compute zero spread for identical hourly rates", () => {
+      // Same hourly rate on both exchanges
+      const spread = computeAnnualSpread(0.001, "hyperliquid", 0.001, "pacifica");
       expect(Math.abs(spread)).toBeLessThan(1); // should be ~0
     });
   });

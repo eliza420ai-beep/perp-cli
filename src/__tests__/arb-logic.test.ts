@@ -20,7 +20,7 @@ function determinArbDirection(snap: FundingSnapshot) {
 }
 
 function computeAnnualizedSpread(pacRate: number, hlRate: number): number {
-  return (pacRate - hlRate) * 3 * 365 * 100;
+  return (pacRate - hlRate) * 24 * 365 * 100;
 }
 
 describe("Arb direction logic", () => {
@@ -68,15 +68,15 @@ describe("Arb direction logic", () => {
 
 describe("Spread calculation", () => {
   it("computes annualized spread correctly", () => {
-    // 0.01% per 8h difference → 0.03% per day → 10.95% per year
+    // 0.01% per hour difference → 0.24% per day → 87.6% per year
     const spread = computeAnnualizedSpread(0.0002, 0.0001);
-    expect(spread).toBeCloseTo(10.95, 1);
+    expect(spread).toBeCloseTo(87.6, 1);
   });
 
   it("negative spread when HL rate is higher", () => {
     const spread = computeAnnualizedSpread(0.0001, 0.0003);
     expect(spread).toBeLessThan(0);
-    expect(Math.abs(spread)).toBeCloseTo(21.9, 1);
+    expect(Math.abs(spread)).toBeCloseTo(175.2, 1);
   });
 
   it("zero spread when rates are equal", () => {

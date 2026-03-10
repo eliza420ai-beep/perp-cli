@@ -166,7 +166,7 @@ describe("fetchAllFundingRates", () => {
     const btc = snapshot.symbols.find(s => s.symbol === "BTC");
     expect(btc).toBeTruthy();
     // PAC funding is higher -> short PAC (get paid), long HL (pay less)
-    // HL rate per hour = 0.00005, PAC rate per hour = 0.001/8 = 0.000125
+    // HL rate per hour = 0.00005, PAC rate per hour = 0.001
     // HL hourly < PAC hourly -> long on HL, short on PAC
     expect(btc!.longExchange).toBe("hyperliquid");
     expect(btc!.shortExchange).toBe("pacifica");
@@ -361,14 +361,14 @@ describe("fetchSymbolFundingRates", () => {
 describe("3-DEX direction logic", () => {
   it("picks correct long/short when lighter has best rate", async () => {
     setupMockFetch({
-      pac: [{ symbol: "BTC", funding: 0.0006, mark: 60000 }],  // mid
+      pac: [{ symbol: "BTC", funding: 0.00006, mark: 60000 }],  // mid (0.00006/hr)
       hl: {
         assets: [{ name: "BTC" }],
-        ctxs: [{ funding: 0.0002, markPx: 60100 }],  // highest (HL is hourly, so 0.0002/hr > others/8h)
+        ctxs: [{ funding: 0.0002, markPx: 60100 }],  // highest (0.0002/hr)
       },
       lt: {
         details: [{ market_id: 1, symbol: "BTC", last_trade_price: 59900 }],
-        funding: [{ market_id: 1, rate: 0.0001 }],  // lowest (0.0001/8h)
+        funding: [{ market_id: 1, rate: 0.00001 }],  // lowest (0.00001/hr)
       },
     });
 
@@ -383,14 +383,14 @@ describe("3-DEX direction logic", () => {
 
   it("picks pacifica as short when it has highest rate", async () => {
     setupMockFetch({
-      pac: [{ symbol: "ETH", funding: 0.005, mark: 3000 }],  // highest (0.005/8h = 0.000625/hr)
+      pac: [{ symbol: "ETH", funding: 0.0005, mark: 3000 }],  // highest (0.0005/hr)
       hl: {
         assets: [{ name: "ETH" }],
-        ctxs: [{ funding: 0.0001, markPx: 3010 }],  // 0.0001/hr
+        ctxs: [{ funding: 0.0001, markPx: 3010 }],  // mid (0.0001/hr)
       },
       lt: {
         details: [{ market_id: 2, symbol: "ETH", last_trade_price: 2990 }],
-        funding: [{ market_id: 2, rate: 0.0002 }],  // 0.0002/8h = 0.000025/hr (lowest)
+        funding: [{ market_id: 2, rate: 0.000025 }],  // lowest (0.000025/hr)
       },
     });
 

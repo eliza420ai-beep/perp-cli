@@ -293,13 +293,12 @@ export function getHistoricalAverages(
 /**
  * Calculate effective annualized return considering compounding frequency.
  *
- * HL compounds every 1h (8760 times/year).
- * PAC/LT compound every 8h (1095 times/year).
+ * All three main exchanges (HL, PAC, LT) compound every 1h (8760 times/year).
  *
  * Formula: (1 + rate)^(8760/compoundingHours) - 1
  *
  * @param hourlyRate - the per-hour funding rate
- * @param compoundingHours - how often the exchange compounds (1 for HL, 8 for PAC/LT)
+ * @param compoundingHours - how often the exchange compounds (1 for all main exchanges)
  * @returns effective annualized return as a decimal (not percentage)
  */
 export function getCompoundedAnnualReturn(hourlyRate: number, compoundingHours: number): number {
@@ -313,7 +312,9 @@ export function getCompoundedAnnualReturn(hourlyRate: number, compoundingHours: 
 
 /**
  * Get the compounding hours for an exchange.
+ * All main exchanges (HL, PAC, LT) compound every 1h.
  */
 export function getExchangeCompoundingHours(exchange: string): number {
-  return exchange.toLowerCase() === "hyperliquid" ? 1 : 8;
+  // All main exchanges compound hourly
+  return 1;
 }

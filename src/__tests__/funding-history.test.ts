@@ -368,18 +368,17 @@ describe("funding-history", () => {
       expect(result).toBeGreaterThan(0.876); // Should be > simple rate of 87.6%
     });
 
-    it("calculates correct compounded return for PAC/LT (8h compounding)", () => {
+    it("calculates correct compounded return for PAC/LT (1h compounding, same as HL)", () => {
       // hourlyRate = 0.0001
-      // periodRate = 0.0001 * 8 = 0.0008
-      // periodsPerYear = 8760/8 = 1095
-      // (1 + 0.0008)^1095 - 1
-      const result = getCompoundedAnnualReturn(0.0001, 8);
-      expect(result).toBeCloseTo(Math.pow(1.0008, 1095) - 1, 2);
+      // periodRate = 0.0001 * 1 = 0.0001
+      // periodsPerYear = 8760/1 = 8760
+      // (1 + 0.0001)^8760 - 1
+      const result = getCompoundedAnnualReturn(0.0001, 1);
+      expect(result).toBeCloseTo(Math.pow(1.0001, 8760) - 1, 2);
     });
 
     it("returns 0 for zero rate", () => {
       expect(getCompoundedAnnualReturn(0, 1)).toBe(0);
-      expect(getCompoundedAnnualReturn(0, 8)).toBe(0);
     });
 
     it("handles negative rates", () => {
@@ -389,13 +388,13 @@ describe("funding-history", () => {
       expect(result).toBeCloseTo(Math.pow(1 - 0.0001, 8760) - 1, 2);
     });
 
-    it("more frequent compounding yields higher effective rate for positive rates", () => {
+    it("all exchanges compound at the same frequency (1h)", () => {
       const hourlyRate = 0.0001;
       const hl = getCompoundedAnnualReturn(hourlyRate, 1);   // compound every 1h
-      const pac = getCompoundedAnnualReturn(hourlyRate, 8);   // compound every 8h
+      const pac = getCompoundedAnnualReturn(hourlyRate, 1);   // compound every 1h (same as HL)
 
-      // More frequent compounding (HL) should give higher effective annual return
-      expect(hl).toBeGreaterThan(pac);
+      // Same compounding frequency, same effective annual return
+      expect(hl).toBeCloseTo(pac, 10);
     });
 
     it("simple rate sanity check: small rate, compounded vs simple", () => {
@@ -417,16 +416,16 @@ describe("funding-history", () => {
       expect(getExchangeCompoundingHours("hyperliquid")).toBe(1);
     });
 
-    it("returns 8 for pacifica", () => {
-      expect(getExchangeCompoundingHours("pacifica")).toBe(8);
+    it("returns 1 for pacifica", () => {
+      expect(getExchangeCompoundingHours("pacifica")).toBe(1);
     });
 
-    it("returns 8 for lighter", () => {
-      expect(getExchangeCompoundingHours("lighter")).toBe(8);
+    it("returns 1 for lighter", () => {
+      expect(getExchangeCompoundingHours("lighter")).toBe(1);
     });
 
-    it("returns 8 for unknown exchanges", () => {
-      expect(getExchangeCompoundingHours("binance")).toBe(8);
+    it("returns 1 for unknown exchanges", () => {
+      expect(getExchangeCompoundingHours("binance")).toBe(1);
     });
   });
 });

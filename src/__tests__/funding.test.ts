@@ -16,23 +16,23 @@ describe("getFundingHours", () => {
     expect(getFundingHours("hyperliquid")).toBe(1);
   });
 
-  it("returns 8 for pacifica", () => {
-    expect(getFundingHours("pacifica")).toBe(8);
+  it("returns 1 for pacifica", () => {
+    expect(getFundingHours("pacifica")).toBe(1);
   });
 
-  it("returns 8 for lighter", () => {
-    expect(getFundingHours("lighter")).toBe(8);
+  it("returns 1 for lighter", () => {
+    expect(getFundingHours("lighter")).toBe(1);
   });
 
-  it("defaults to 8 for unknown exchanges", () => {
-    expect(getFundingHours("binance")).toBe(8);
-    expect(getFundingHours("unknown_dex")).toBe(8);
+  it("defaults to 1 for unknown exchanges (main exchanges are hourly)", () => {
+    expect(getFundingHours("binance")).toBe(1);
+    expect(getFundingHours("unknown_dex")).toBe(1);
   });
 
   it("is case-insensitive", () => {
     expect(getFundingHours("Hyperliquid")).toBe(1);
-    expect(getFundingHours("PACIFICA")).toBe(8);
-    expect(getFundingHours("Lighter")).toBe(8);
+    expect(getFundingHours("PACIFICA")).toBe(1);
+    expect(getFundingHours("Lighter")).toBe(1);
   });
 });
 
@@ -46,18 +46,18 @@ describe("toHourlyRate", () => {
     expect(hourly).toBeCloseTo(0.0001);
   });
 
-  it("divides by 8 for pacifica", () => {
-    const hourly = toHourlyRate(0.0008, "pacifica");
+  it("divides by 1 for pacifica (rate is already per-hour)", () => {
+    const hourly = toHourlyRate(0.0001, "pacifica");
     expect(hourly).toBeCloseTo(0.0001);
   });
 
-  it("divides by 8 for lighter", () => {
-    const hourly = toHourlyRate(0.0016, "lighter");
+  it("divides by 1 for lighter (rate is already per-hour)", () => {
+    const hourly = toHourlyRate(0.0002, "lighter");
     expect(hourly).toBeCloseTo(0.0002);
   });
 
-  it("divides by 8 for unknown exchanges (default)", () => {
-    const hourly = toHourlyRate(0.0008, "someExchange");
+  it("divides by 1 for unknown exchanges (default)", () => {
+    const hourly = toHourlyRate(0.0001, "someExchange");
     expect(hourly).toBeCloseTo(0.0001);
   });
 
@@ -67,7 +67,7 @@ describe("toHourlyRate", () => {
   });
 
   it("handles negative rate", () => {
-    const hourly = toHourlyRate(-0.0008, "pacifica");
+    const hourly = toHourlyRate(-0.0001, "pacifica");
     expect(hourly).toBeCloseTo(-0.0001);
   });
 });
@@ -83,16 +83,16 @@ describe("annualizeRate", () => {
     expect(annual).toBeCloseTo(87.6);
   });
 
-  it("annualizes pacifica rate (divide by 8, then * 8760 * 100)", () => {
-    // rate = 0.0008 per 8h → hourly = 0.0001 → annualized = 87.6%
-    const annual = annualizeRate(0.0008, "pacifica");
+  it("annualizes pacifica rate (hourly * 8760 * 100)", () => {
+    // rate = 0.0001 per hour → annualized = 0.0001 * 8760 * 100 = 87.6%
+    const annual = annualizeRate(0.0001, "pacifica");
     expect(annual).toBeCloseTo(87.6);
   });
 
   it("produces same annualized rate for equivalent rates across exchanges", () => {
-    // 0.0001/h (HL) should equal 0.0008/8h (pacifica)
+    // All exchanges are hourly now, so same rate = same annualized
     const hlAnnual = annualizeRate(0.0001, "hyperliquid");
-    const pacAnnual = annualizeRate(0.0008, "pacifica");
+    const pacAnnual = annualizeRate(0.0001, "pacifica");
     expect(hlAnnual).toBeCloseTo(pacAnnual);
   });
 
@@ -113,14 +113,14 @@ describe("annualizeRate", () => {
 
 describe("computeAnnualSpread", () => {
   it("computes spread between two different exchanges", () => {
-    // HL rate 0.0002/h, pacifica rate 0.0008/8h=0.0001/h → spread = 0.0001/h * 8760 * 100 = 87.6%
-    const spread = computeAnnualSpread(0.0002, "hyperliquid", 0.0008, "pacifica");
+    // HL rate 0.0002/h, pacifica rate 0.0001/h → spread = 0.0001/h * 8760 * 100 = 87.6%
+    const spread = computeAnnualSpread(0.0002, "hyperliquid", 0.0001, "pacifica");
     expect(spread).toBeCloseTo(87.6);
   });
 
-  it("returns 0 when rates are identical (after normalization)", () => {
-    // HL 0.0001/h and pacifica 0.0008/8h = same hourly rate
-    const spread = computeAnnualSpread(0.0001, "hyperliquid", 0.0008, "pacifica");
+  it("returns 0 when rates are identical", () => {
+    // Both hourly, same rate
+    const spread = computeAnnualSpread(0.0001, "hyperliquid", 0.0001, "pacifica");
     expect(spread).toBeCloseTo(0);
   });
 
@@ -131,11 +131,10 @@ describe("computeAnnualSpread", () => {
     expect(spread1).toBeGreaterThan(0);
   });
 
-  it("computes spread with same exchange type (both 8h)", () => {
-    // pacifica 0.001/8h and lighter 0.0005/8h
-    // hourly: 0.000125 and 0.0000625
+  it("computes spread with same exchange type (both hourly)", () => {
+    // pacifica 0.000125/h and lighter 0.0000625/h
     // diff: 0.0000625/h * 8760 * 100 = 54.75%
-    const spread = computeAnnualSpread(0.001, "pacifica", 0.0005, "lighter");
+    const spread = computeAnnualSpread(0.000125, "pacifica", 0.0000625, "lighter");
     expect(spread).toBeCloseTo(54.75);
   });
 
@@ -151,9 +150,9 @@ describe("computeAnnualSpread", () => {
   });
 
   it("handles negative rates (one exchange paying, other receiving)", () => {
-    // HL pays +0.0001/h, pacifica -0.0008/8h = -0.0001/h
+    // HL pays +0.0001/h, pacifica -0.0001/h
     // diff = |0.0001 - (-0.0001)| = 0.0002/h * 8760 * 100 = 175.2%
-    const spread = computeAnnualSpread(0.0001, "hyperliquid", -0.0008, "pacifica");
+    const spread = computeAnnualSpread(0.0001, "hyperliquid", -0.0001, "pacifica");
     expect(spread).toBeCloseTo(175.2);
   });
 });
@@ -191,10 +190,10 @@ describe("estimateHourlyFunding", () => {
     expect(payment).toBeCloseTo(1);
   });
 
-  it("normalizes 8h rate to hourly for pacifica", () => {
-    // rate = 0.0008/8h (pacifica) → 0.0001/h, position = $10000
+  it("uses hourly rate directly for pacifica", () => {
+    // rate = 0.0001/h (pacifica), position = $10000
     // long pays: 0.0001 * 10000 = $1
-    const payment = estimateHourlyFunding(0.0008, "pacifica", 10000, "long");
+    const payment = estimateHourlyFunding(0.0001, "pacifica", 10000, "long");
     expect(payment).toBeCloseTo(1);
   });
 

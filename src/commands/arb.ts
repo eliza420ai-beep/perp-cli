@@ -194,7 +194,7 @@ export function registerArbCommands(
         )
       );
 
-      console.log(chalk.gray("\n  Note: Rates normalized (HL=hourly, LT/PAC=8h) before annualizing.\n"));
+      console.log(chalk.gray("\n  Note: All rates are hourly. Normalized before annualizing.\n"));
     });
 
   arb

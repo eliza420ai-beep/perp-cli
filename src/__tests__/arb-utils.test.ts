@@ -21,11 +21,11 @@ describe("getMinutesSinceSettlement", () => {
     expect(mins).toBeCloseTo(30, 0);
   });
 
-  it("returns correct minutes after PAC settlement (every 8h)", () => {
-    // 10:15 UTC — last PAC settlement was at 08:00, so 135 minutes ago
+  it("returns correct minutes after PAC settlement (every 1h, same as HL)", () => {
+    // 10:15 UTC — last PAC settlement was at 10:00, so 15 minutes ago
     const now = new Date("2024-06-15T10:15:00Z");
     const mins = getMinutesSinceSettlement("pacifica", now);
-    expect(mins).toBeCloseTo(135, 0);
+    expect(mins).toBeCloseTo(15, 0);
   });
 
   it("returns small value right after settlement", () => {
@@ -36,10 +36,10 @@ describe("getMinutesSinceSettlement", () => {
   });
 
   it("returns correct value right before next settlement", () => {
-    // 07:55 UTC — 475 minutes since last PAC settlement at 00:00
+    // 07:55 UTC — 55 minutes since last PAC settlement at 07:00
     const now = new Date("2024-06-15T07:55:00Z");
     const mins = getMinutesSinceSettlement("pacifica", now);
-    expect(mins).toBeCloseTo(475, 0);
+    expect(mins).toBeCloseTo(55, 0);
   });
 
   it("handles midnight correctly for PAC", () => {
@@ -49,7 +49,7 @@ describe("getMinutesSinceSettlement", () => {
     expect(mins).toBeCloseTo(5, 0);
   });
 
-  it("handles Lighter same as Pacifica", () => {
+  it("handles Lighter same as Pacifica (both hourly)", () => {
     const now = new Date("2024-06-15T10:00:00Z");
     const pacMins = getMinutesSinceSettlement("pacifica", now);
     const ltMins = getMinutesSinceSettlement("lighter", now);
@@ -65,8 +65,8 @@ describe("getLastSettlement", () => {
     expect(last.getUTCMinutes()).toBe(0);
   });
 
-  it("returns previous day for PAC when before first settlement", () => {
-    // Actually 00:00 is a settlement, so at 00:05 the last is 00:00 same day
+  it("returns same hour for PAC (hourly settlement, same as HL)", () => {
+    // At 00:05 the last PAC settlement is 00:00 same day
     const now = new Date("2024-06-15T00:05:00Z");
     const last = getLastSettlement("pacifica", now);
     expect(last.getUTCHours()).toBe(0);
@@ -94,15 +94,15 @@ describe("aggressiveSettleBoost", () => {
   });
 
   it("returns 1.0 when far from settlement", () => {
-    // 14:30 — PAC settled at 08:00, 390 minutes ago
+    // 14:30 — both HL and PAC settled at 14:00, 30 minutes ago
     const now = new Date("2024-06-15T14:30:00Z");
     const boost = aggressiveSettleBoost("hyperliquid", "pacifica", 10, now);
-    // HL settled 30min ago > 10 window, PAC settled 390min ago
-    // min(30, 390) = 30 > 10, so boost = 1.0
+    // HL settled 30min ago > 10 window, PAC settled 30min ago > 10 window
+    // min(30, 30) = 30 > 10, so boost = 1.0
     expect(boost).toBe(1.0);
   });
 
-  it("returns 1.0 for HL-only pair when HL settled > window ago", () => {
+  it("returns 1.0 for both exchanges when settled > window ago", () => {
     // HL settled 15 minutes ago, PAC settled 15 minutes ago
     // With window of 10, both are > 10 so boost = 1.0
     const now = new Date("2024-06-15T08:15:00Z");
@@ -125,22 +125,23 @@ describe("aggressiveSettleBoost", () => {
 
 describe("estimateFundingUntilSettlement", () => {
   it("calculates correct cumulative HL funding", () => {
-    // 0.01% hourly rate, $1000 position, 4 hours until PAC settlement
-    const result = estimateFundingUntilSettlement(0.0001, 0.0008, 1000, 4);
+    // 0.01% hourly rate, $1000 position, 4 hours until settlement
+    const result = estimateFundingUntilSettlement(0.0001, 0.00005, 1000, 4);
     // hlCumulative = 0.0001 * 1000 * 4 = 0.4
     expect(result.hlCumulative).toBeCloseTo(0.4, 4);
   });
 
-  it("calculates correct PAC payment", () => {
-    const result = estimateFundingUntilSettlement(0.0001, 0.0008, 1000, 4);
-    // pacPayment = 0.0008 * 1000 = 0.8
-    expect(result.pacPayment).toBeCloseTo(0.8, 4);
+  it("calculates correct PAC payment (also hourly)", () => {
+    // PAC hourly rate = 0.00005, $1000 position, 4 hours
+    const result = estimateFundingUntilSettlement(0.0001, 0.00005, 1000, 4);
+    // pacPayment = 0.00005 * 1000 * 4 = 0.2
+    expect(result.pacPayment).toBeCloseTo(0.2, 4);
   });
 
   it("calculates net funding correctly", () => {
-    const result = estimateFundingUntilSettlement(0.0001, 0.0008, 1000, 4);
-    // net = 0.4 - 0.8 = -0.4
-    expect(result.netFunding).toBeCloseTo(-0.4, 4);
+    const result = estimateFundingUntilSettlement(0.0001, 0.00005, 1000, 4);
+    // net = 0.4 - 0.2 = 0.2
+    expect(result.netFunding).toBeCloseTo(0.2, 4);
   });
 
   it("handles zero rates", () => {
@@ -151,16 +152,17 @@ describe("estimateFundingUntilSettlement", () => {
   });
 
   it("scales linearly with position size", () => {
-    const small = estimateFundingUntilSettlement(0.0001, 0.0008, 100, 4);
-    const big = estimateFundingUntilSettlement(0.0001, 0.0008, 1000, 4);
+    const small = estimateFundingUntilSettlement(0.0001, 0.00005, 100, 4);
+    const big = estimateFundingUntilSettlement(0.0001, 0.00005, 1000, 4);
     expect(big.hlCumulative).toBeCloseTo(small.hlCumulative * 10, 4);
     expect(big.pacPayment).toBeCloseTo(small.pacPayment * 10, 4);
   });
 
-  it("HL cumulative scales with time", () => {
-    const short = estimateFundingUntilSettlement(0.0001, 0.0008, 1000, 2);
-    const long = estimateFundingUntilSettlement(0.0001, 0.0008, 1000, 8);
+  it("both sides scale with time (both hourly)", () => {
+    const short = estimateFundingUntilSettlement(0.0001, 0.00005, 1000, 2);
+    const long = estimateFundingUntilSettlement(0.0001, 0.00005, 1000, 8);
     expect(long.hlCumulative).toBeCloseTo(short.hlCumulative * 4, 4);
+    expect(long.pacPayment).toBeCloseTo(short.pacPayment * 4, 4);
   });
 });
 

@@ -64,8 +64,8 @@ function accumulateFunding(
   const elapsedHours = (nowMs - pos.lastCheckTime) / (1000 * 60 * 60);
   const notional = parseFloat(pos.size) * current.markPrice;
   const rateFor = (e: string) => e === "pacifica" ? current.pacRate : e === "hyperliquid" ? current.hlRate : current.ltRate;
-  const longHourly = rateFor(pos.longExchange) / (pos.longExchange === "hyperliquid" ? 1 : 8);
-  const shortHourly = rateFor(pos.shortExchange) / (pos.shortExchange === "hyperliquid" ? 1 : 8);
+  const longHourly = rateFor(pos.longExchange) / 1;  // all exchanges are hourly
+  const shortHourly = rateFor(pos.shortExchange) / 1;  // all exchanges are hourly
   const hourlyIncome = (shortHourly - longHourly) * notional;
   return hourlyIncome * elapsedHours;
 }
@@ -78,25 +78,25 @@ describe("3-DEX direction determination", () => {
   it("uses longExch/shortExch from snapshot (all 3 available)", () => {
     const snap: FundingSnapshot = {
       symbol: "BTC",
-      pacRate: 0.0006,   // pac = 0.000075/hr
-      hlRate: 0.0003,    // hl = 0.0003/hr (highest!)
-      ltRate: 0.0002,    // lt = 0.000025/hr (lowest!)
+      pacRate: 0.0006,   // pac = 0.0006/hr
+      hlRate: 0.0003,    // hl = 0.0003/hr
+      ltRate: 0.0002,    // lt = 0.0002/hr (lowest!)
       spread: 240.9,
       longExch: "lighter",
-      shortExch: "hyperliquid",
+      shortExch: "pacifica",
       markPrice: 60000,
     };
 
     const { longExchange, shortExchange } = determine3DexDirection(snap);
     expect(longExchange).toBe("lighter");
-    expect(shortExchange).toBe("hyperliquid");
+    expect(shortExchange).toBe("pacifica");
   });
 
   it("handles pac vs hl only (lighter missing)", () => {
     const snap: FundingSnapshot = {
       symbol: "ETH",
-      pacRate: 0.002,     // pac = 0.00025/hr
-      hlRate: 0.00005,    // hl = 0.00005/hr
+      pacRate: 0.002,     // pac = 0.002/hr (highest)
+      hlRate: 0.00005,    // hl = 0.00005/hr (lowest)
       ltRate: 0,          // no lighter
       spread: 175.2,
       longExch: "hyperliquid",
@@ -149,8 +149,8 @@ describe("Funding accumulation tracking", () => {
 
     const snap: FundingSnapshot = {
       symbol: "BTC",
-      pacRate: 0.001,    // pac = 0.000125/hr
-      hlRate: 0.00005,   // hl = 0.00005/hr
+      pacRate: 0.000125,   // pac = 0.000125/hr (all hourly now)
+      hlRate: 0.00005,     // hl = 0.00005/hr
       ltRate: 0,
       spread: 65.7,
       longExch: "hyperliquid",
@@ -160,8 +160,8 @@ describe("Funding accumulation tracking", () => {
 
     // 1 hour elapsed
     const income = accumulateFunding(pos, snap, baseTime + 3600_000);
-    // shortHourly = 0.001/8 = 0.000125
-    // longHourly = 0.00005/1 = 0.00005
+    // shortHourly = 0.000125
+    // longHourly = 0.00005
     // diff = 0.000125 - 0.00005 = 0.000075
     // notional = 0.1 * 60000 = 6000
     // income = 0.000075 * 6000 * 1 = $0.45/hr
@@ -183,7 +183,7 @@ describe("Funding accumulation tracking", () => {
 
     const snap: FundingSnapshot = {
       symbol: "ETH",
-      pacRate: 0.0005,
+      pacRate: 0.0005,    // all hourly now
       hlRate: 0.0001,
       ltRate: 0.0001,
       spread: 43.8,
@@ -211,7 +211,7 @@ describe("Funding accumulation tracking", () => {
 
     const snap: FundingSnapshot = {
       symbol: "BTC",
-      pacRate: 0.001,
+      pacRate: 0.000125,
       hlRate: 0.00005,
       ltRate: 0,
       spread: 65.7,
@@ -241,8 +241,8 @@ describe("Funding accumulation tracking", () => {
     // Now PAC rate is HIGHER than HL — bad for our direction
     const snap: FundingSnapshot = {
       symbol: "BTC",
-      pacRate: 0.002,     // pac now high: 0.00025/hr
-      hlRate: 0.00001,    // hl now low: 0.00001/hr
+      pacRate: 0.00025,    // pac now high: 0.00025/hr
+      hlRate: 0.00001,     // hl now low: 0.00001/hr
       ltRate: 0,
       spread: 218.3,
       longExch: "hyperliquid",
@@ -252,7 +252,7 @@ describe("Funding accumulation tracking", () => {
 
     const income = accumulateFunding(pos, snap, baseTime + 3600_000);
     // shortHourly (HL) = 0.00001
-    // longHourly (PAC) = 0.002/8 = 0.00025
+    // longHourly (PAC) = 0.00025
     // diff = 0.00001 - 0.00025 = -0.00024
     // notional = 6000
     // income = -0.00024 * 6000 * 1 = -$1.44
@@ -388,7 +388,7 @@ describe("Spread reversal detection", () => {
       shortExch: "hyperliquid",
       markPrice: 60000,
     };
-    // Position: long HL, short PAC — but now HL hourly (0.0005) > PAC hourly (0.0001/8=0.0000125)
+    // Position: long HL, short PAC — but now HL hourly (0.0005) > PAC hourly (0.0001)
     const reversed = isSpreadReversed("hyperliquid", "pacifica", snap);
     expect(reversed).toBe(true);
   });
@@ -396,15 +396,15 @@ describe("Spread reversal detection", () => {
   it("does not flag reversal when spread is still favorable", () => {
     const snap: FundingSnapshot = {
       symbol: "BTC",
-      pacRate: 0.001,    // PAC high
-      hlRate: 0.00005,   // HL low
+      pacRate: 0.001,    // PAC high (0.001/hr)
+      hlRate: 0.00005,   // HL low (0.00005/hr)
       ltRate: 0,
       spread: 65.7,
       longExch: "hyperliquid",
       shortExch: "pacifica",
       markPrice: 60000,
     };
-    // Position: long HL, short PAC — HL hourly (0.00005) < PAC hourly (0.001/8=0.000125) → no reversal
+    // Position: long HL, short PAC — HL hourly (0.00005) < PAC hourly (0.001) → no reversal
     const reversed = isSpreadReversed("hyperliquid", "pacifica", snap);
     expect(reversed).toBe(false);
   });
@@ -412,15 +412,15 @@ describe("Spread reversal detection", () => {
   it("handles lighter vs pacifica reversal", () => {
     const snap: FundingSnapshot = {
       symbol: "SOL",
-      pacRate: 0.0001,   // PAC hourly = 0.0000125
+      pacRate: 0.0001,   // PAC hourly = 0.0001
       hlRate: 0,
-      ltRate: 0.0002,    // LT hourly = 0.000025
+      ltRate: 0.0002,    // LT hourly = 0.0002
       spread: 10,
       longExch: "pacifica",
       shortExch: "lighter",
       markPrice: 150,
     };
-    // Position: long LT, short PAC — LT hourly (0.000025) > PAC hourly (0.0000125) → reversed
+    // Position: long LT, short PAC — LT hourly (0.0002) > PAC hourly (0.0001) → reversed
     const reversed = isSpreadReversed("lighter", "pacifica", snap);
     expect(reversed).toBe(true);
   });
@@ -439,27 +439,24 @@ describe("Settlement timing awareness", () => {
     expect(next.getUTCMinutes()).toBe(0);
   });
 
-  it("getNextSettlement returns next 8h boundary for PAC", () => {
-    // At 06:00 UTC, next PAC settlement is at 08:00 UTC
-    const now = new Date("2025-01-15T06:00:00Z");
+  it("getNextSettlement returns next hour for PAC (hourly like HL)", () => {
+    // At 06:00 UTC, next PAC settlement is at 07:00 UTC
+    const now = new Date("2025-01-15T06:30:00Z");
     const next = getNextSettlement("pacifica", now);
-    expect(next.getUTCHours()).toBe(8);
+    expect(next.getUTCHours()).toBe(7);
   });
 
-  it("getNextSettlement wraps to next day when past last settlement", () => {
-    // At 17:00 UTC, next PAC settlement is at 00:00 next day
-    const now = new Date("2025-01-15T17:00:00Z");
+  it("getNextSettlement wraps to next day for PAC when at 23:xx", () => {
+    // At 23:30 UTC, next PAC settlement is at 00:00 next day
+    const now = new Date("2025-01-15T23:30:00Z");
     const next = getNextSettlement("pacifica", now);
     expect(next.getUTCHours()).toBe(0);
     expect(next.getUTCDate()).toBe(16);
   });
 
   it("isNearSettlement blocks entry within 5 minutes of settlement", () => {
-    // 3 minutes before 08:00 UTC PAC settlement; HL next is also coming but at 06:00 → 6:03 away
-    // Use a time where HL is far from settlement but PAC is near
+    // 3 minutes before 08:00 UTC settlement — all exchanges settle hourly now
     const now = new Date("2025-01-15T07:57:00Z");
-    // HL next settlement: 08:00 (3 min away) — but HL settles hourly so it's also near!
-    // To isolate PAC, use lighter+pacifica (both 8h) where one is near
     const result = isNearSettlement("lighter", "pacifica", 5, now);
     expect(result.blocked).toBe(true);
     // Both lighter and pacifica settle at 08:00, lighter checked first
@@ -468,7 +465,7 @@ describe("Settlement timing awareness", () => {
   });
 
   it("isNearSettlement allows entry far from settlement", () => {
-    // 30 minutes before 16:00 UTC PAC settlement
+    // 30 minutes past the hour — next settlement is 30 min away
     const now = new Date("2025-01-15T15:30:00Z");
     const result = isNearSettlement("lighter", "pacifica", 5, now);
     expect(result.blocked).toBe(false);

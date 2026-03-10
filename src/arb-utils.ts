@@ -10,8 +10,8 @@ import type { ExchangeAdapter } from "./exchanges/interface.js";
 /** Settlement schedules per exchange (UTC hours when settlement occurs) */
 const SETTLEMENT_SCHEDULES: Record<string, number[]> = {
   hyperliquid: Array.from({ length: 24 }, (_, i) => i), // every hour
-  pacifica: [0, 8, 16],   // every 8 hours
-  lighter: [0, 8, 16],    // every 8 hours
+  pacifica: Array.from({ length: 24 }, (_, i) => i),    // every hour
+  lighter: Array.from({ length: 24 }, (_, i) => i),     // every hour
 };
 
 export type SettleStrategy = "block" | "aggressive" | "off";
@@ -86,26 +86,29 @@ export function aggressiveSettleBoost(
 }
 
 /**
- * Estimate cumulative funding between now and the next PAC settlement.
+ * Estimate cumulative funding between now and the next settlement.
+ *
+ * Since all three exchanges (HL, PAC, LT) settle every hour, both sides
+ * accumulate funding at the same frequency. The function estimates
+ * cumulative funding over the given time horizon.
  *
  * @param hlHourlyRate - HL per-hour funding rate (raw, not %)
- * @param pacRate8h - PAC per-8h funding rate (raw, not %)
+ * @param pacHourlyRate - PAC per-hour funding rate (raw, not %)
  * @param positionSize - position notional in USD
- * @param hoursUntilPacSettlement - hours until next PAC settlement
+ * @param hoursUntilSettlement - hours until next settlement
  * @returns { hlCumulative, pacPayment, netFunding } in USD (positive = you receive)
  */
 export function estimateFundingUntilSettlement(
   hlHourlyRate: number,
-  pacRate8h: number,
+  pacHourlyRate: number,
   positionSize: number,
-  hoursUntilPacSettlement: number,
+  hoursUntilSettlement: number,
 ): { hlCumulative: number; pacPayment: number; netFunding: number } {
-  // HL settles every hour, so we accumulate over hoursUntilPacSettlement hours
-  // For a short position on HL with positive rate: we receive funding each hour
-  const hlCumulative = Math.abs(hlHourlyRate) * positionSize * hoursUntilPacSettlement;
+  // Both exchanges settle every hour, so we accumulate over the same period
+  const hlCumulative = Math.abs(hlHourlyRate) * positionSize * hoursUntilSettlement;
 
-  // PAC settles once at the end of the 8h period
-  const pacPayment = Math.abs(pacRate8h) * positionSize;
+  // PAC also settles every hour, so cumulative over same period
+  const pacPayment = Math.abs(pacHourlyRate) * positionSize * hoursUntilSettlement;
 
   // Net assumes: short high-rate exchange (receive), long low-rate (pay less)
   // In a typical arb, we short the high-rate and long the low-rate

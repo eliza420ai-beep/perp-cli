@@ -118,8 +118,8 @@ export function computeNetSpread(
 /** Settlement schedules per exchange (UTC hours when settlement occurs) */
 const SETTLEMENT_SCHEDULES: Record<string, number[]> = {
   hyperliquid: Array.from({ length: 24 }, (_, i) => i), // every hour
-  pacifica: [0, 8, 16],   // every 8 hours
-  lighter: [0, 8, 16],    // every 8 hours
+  pacifica: Array.from({ length: 24 }, (_, i) => i),    // every hour
+  lighter: Array.from({ length: 24 }, (_, i) => i),     // every hour
 };
 
 /**
@@ -129,7 +129,7 @@ const SETTLEMENT_SCHEDULES: Record<string, number[]> = {
 export function getNextSettlement(exchange: string, now: Date = new Date()): Date {
   const schedule = SETTLEMENT_SCHEDULES[exchange.toLowerCase()];
   if (!schedule || schedule.length === 0) {
-    // Default: every 8 hours
+    // Default: every hour
     return getNextSettlement("pacifica", now);
   }
 
@@ -575,9 +575,9 @@ export function registerArbAutoCommands(
               if (!fSnap) continue;
               const fRateFor = (e: string) => e === "pacifica" ? fSnap.pacRate : e === "hyperliquid" ? fSnap.hlRate : fSnap.ltRate;
               const fHlHourly = toHourlyRate(fRateFor("hyperliquid"), "hyperliquid");
-              const fPacRate8h = fRateFor("pacifica");
+              const fPacHourly = toHourlyRate(fRateFor("pacifica"), "pacifica");
               const fNotional = parseFloat(fPos.size) * fSnap.markPrice;
-              const fEst = estimateFundingUntilSettlement(fHlHourly, fPacRate8h, fNotional, hoursUntilPAC);
+              const fEst = estimateFundingUntilSettlement(fHlHourly, fPacHourly, fNotional, hoursUntilPAC);
               console.log(chalk.gray(
                 `  ${now} ${fPos.symbol} Next PAC: ${hUTC}:00 UTC (${hoursUntilPAC.toFixed(1)}h) | ` +
                 `HL cum: ~$${fEst.hlCumulative.toFixed(4)} | PAC pmt: ~$${fEst.pacPayment.toFixed(4)} | ` +

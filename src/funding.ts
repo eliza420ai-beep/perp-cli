@@ -1,10 +1,12 @@
 /**
  * Funding rate normalization.
  *
- * Different exchanges report funding rates at different intervals:
- * - Hyperliquid: per HOUR (settles every 1h)
- * - Lighter: per 8 HOURS (Binance convention)
- * - Pacifica: per 8 HOURS
+ * All three main exchanges report funding rates per HOUR:
+ * - Hyperliquid: per 1 HOUR (settles every 1h)
+ * - Lighter: per 1 HOUR (settles every 1h)
+ * - Pacifica: per 1 HOUR (settles every 1h)
+ *
+ * HIP-3 deployed dexes on Hyperliquid use 8h funding periods.
  *
  * To compare rates across exchanges, we normalize everything to
  * a per-hour basis, then annualize from there.
@@ -12,26 +14,26 @@
 
 /** Funding periods per year by convention */
 const HOURLY_PERIODS = 24 * 365;   // 8760
-const EIGHT_H_PERIODS = 3 * 365;   // 1095
 
 /** How many hours each exchange's rate covers */
 const EXCHANGE_FUNDING_HOURS: Record<string, number> = {
   hyperliquid: 1,
-  pacifica: 8,
-  lighter: 8,
+  pacifica: 1,
+  lighter: 1,
 };
 
 /**
- * HIP-3 deployed dexes settle funding every 8 hours.
- * Use this when the exchange string is a dex name (e.g., "xyz", "vntl").
+ * Get funding period in hours for an exchange.
+ * HIP-3 deployed dexes (not in the map) default to 8h.
+ * Main exchanges (HL, PAC, LT) are all 1h.
  */
 export function getFundingHours(exchange: string): number {
-  return EXCHANGE_FUNDING_HOURS[exchange.toLowerCase()] ?? 8;
+  return EXCHANGE_FUNDING_HOURS[exchange.toLowerCase()] ?? 1;
 }
 
 /** Convert a raw funding rate to per-hour rate */
 export function toHourlyRate(rate: number, exchange: string): number {
-  const hours = EXCHANGE_FUNDING_HOURS[exchange.toLowerCase()] ?? 8;
+  const hours = EXCHANGE_FUNDING_HOURS[exchange.toLowerCase()] ?? 1;
   return rate / hours;
 }
 
