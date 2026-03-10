@@ -170,9 +170,14 @@ export function registerArbCommands(
 
   arb
     .command("rates")
-    .description("Show all funding rates side by side")
+    .description("[Deprecated] Use 'perp funding rates' instead. Shows all funding rates.")
     .option("-s, --symbol <symbol>", "Filter by symbol")
     .action(async (opts: { symbol?: string }) => {
+      if (!isJson()) {
+        console.log(chalk.yellow("\n  [Deprecated] 'perp arb rates' is deprecated. Use 'perp funding rates' instead.\n"));
+      }
+
+      // Delegate to the same data source as funding rates
       const [pacRates, hlRates, ltRates] = await Promise.all([
         fetchPacificaRates(),
         fetchHyperliquidRates(),
@@ -194,6 +199,7 @@ export function registerArbCommands(
           pacifica: pacMap.get(s)?.fundingRate ?? null,
           hyperliquid: hlMap.get(s)?.fundingRate ?? null,
           lighter: ltMap.get(s)?.fundingRate ?? null,
+          _deprecated: "Use 'perp funding rates' instead",
         }));
         return printJson(jsonOk(data));
       }
@@ -207,7 +213,6 @@ export function registerArbCommands(
           const pacRate = pac ? formatPercent(pac.fundingRate) : chalk.gray("-");
           const hlRate = hl ? formatPercent(hl.fundingRate) : chalk.gray("-");
           const ltRate = lt ? formatPercent(lt.fundingRate) : chalk.gray("-");
-          // Max spread across all available exchanges (normalized)
           const withEx = [
             pac ? { rate: pac.fundingRate, ex: "pacifica" } : null,
             hl ? { rate: hl.fundingRate, ex: "hyperliquid" } : null,
