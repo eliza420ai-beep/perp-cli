@@ -1,0 +1,77 @@
+name: Feature Request
+description: Suggest a new feature or enhancement
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case
+      description: What problem does this solve? Why do you need it?
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: How should it work? Include CLI syntax, MCP tool name, or expected behavior.
+      placeholder: |
+        e.g.
+        perp market depth BTC --levels 10
+        perp --json market depth BTC
+    validations:
+      required: true
+
+  - type: dropdown
+    id: exchanges
+    attributes:
+      label: Affected exchanges
+      multiple: true
+      options:
+        - Pacifica
+        - Hyperliquid
+        - Lighter
+        - All exchanges
+        - N/A (not exchange-specific)
+    validations:
+      required: true
+
+  - type: textarea
+    id: json-shape
+    attributes:
+      label: Expected JSON output shape (if applicable)
+      description: If this adds/changes --json output, describe the shape
+      render: json
+    validations:
+      required: false
+
+  - type: dropdown
+    id: breaking
+    attributes:
+      label: Is this a breaking change?
+      options:
+        - "No"
+        - "Yes"
+        - "Not sure"
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Any alternative approaches you've thought about?
+    validations:
+      required: false
+
+  - type: dropdown
+    id: contribute
+    attributes:
+      label: Would you like to implement this?
+      options:
+        - "Yes, I'd like to submit a PR"
+        - "No, just suggesting"
+        - "Maybe, with guidance"
+    validations:
+      required: true

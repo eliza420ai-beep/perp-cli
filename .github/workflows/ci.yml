@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: Build & Test
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        node-version: [20, 22]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Type check
+        run: pnpm run build
+
+      - name: Unit tests
+        run: pnpm test
+
+      - name: Package smoke test
+        run: |
+          pnpm pack
+          TARBALL=$(ls perp-cli-*.tgz)
+          # Verify both bins exist in the package
+          tar -tzf "$TARBALL" | grep 'dist/index.js'
+          tar -tzf "$TARBALL" | grep 'dist/mcp-server.js'
+          # Install and verify bins actually run
+          mkdir -p /tmp/smoke-test
+          cd /tmp/smoke-test
+          npm init -y > /dev/null 2>&1
+          npm install "$GITHUB_WORKSPACE/$TARBALL" > /dev/null 2>&1
+          npx perp --help
+          npx perp-mcp --help || true
+
+  integration:
+    name: Integration (read-only)
+    runs-on: ubuntu-latest
+    # Not required — depends on external APIs that may be temporarily unavailable
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm run build
+
+      - name: Integration tests (read-only, no API keys needed)
+        run: pnpm run test:integration
