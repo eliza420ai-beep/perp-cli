@@ -9,6 +9,11 @@ import {
   type SymbolFundingComparison,
 } from "../funding-rates.js";
 import { estimateHourlyFunding } from "../funding.js";
+import {
+  getHistoricalRates,
+  getCompoundedAnnualReturn,
+  getExchangeCompoundingHours,
+} from "../funding-history.js";
 
 export function registerFundingCommands(
   program: Command,
@@ -47,6 +52,7 @@ export function registerFundingCommands(
 
       printSnapshotTable(snapshot);
       printExchangeStatus(snapshot);
+      console.log(chalk.gray("  * Rates shown are current predictions. Actual settled rates may differ.\n"));
     });
 
   // ── perp funding compare <symbol> ── (detailed single-symbol view)
@@ -111,19 +117,83 @@ export function registerFundingCommands(
           hlRate ? formatPercent(hlRate.fundingRate) : chalk.gray("-"),
           ltRate ? formatPercent(ltRate.fundingRate) : chalk.gray("-"),
           spreadColor(`${s.maxSpreadAnnual.toFixed(1)}%`),
+          getAvgSpread(s, "avg24h"),
           `${exAbbr(s.shortExchange)}>${exAbbr(s.longExchange)}`,
           `$${s.estHourlyIncomeUsd.toFixed(4)}/hr`,
         ];
       });
 
       console.log(makeTable(
-        ["Symbol", "Price", "Pacifica", "Hyperliquid", "Lighter", "Ann.Spread", "Direction", "Est.Income/$1K"],
+        ["Symbol", "Price", "Pacifica", "Hyperliquid", "Lighter", "Ann.Spread", "Avg Spread(24h)", "Direction", "Est.Income/$1K"],
         rows,
       ));
 
       console.log(chalk.gray(`\n  ${shown.length} opportunities above ${minSpread}% annual spread`));
       console.log(chalk.gray(`  Income estimated for $1,000 notional per leg`));
-      console.log(chalk.gray(`  Use 'perp arb auto --min-spread ${minSpread}' to auto-trade\n`));
+      console.log(chalk.gray(`  Use 'perp arb auto --min-spread ${minSpread}' to auto-trade`));
+      console.log(chalk.gray("\n  * Rates shown are current predictions. Actual settled rates may differ.\n"));
+    });
+
+  // ── perp funding history ── (rate trend over time)
+  funding
+    .command("history")
+    .description("Show funding rate trend over time for a symbol")
+    .requiredOption("-s, --symbol <symbol>", "Symbol to show history for")
+    .option("--hours <n>", "Number of hours to look back", "24")
+    .option("--exchange <ex>", "Filter to a specific exchange")
+    .action(async (opts: { symbol: string; hours: string; exchange?: string }) => {
+      const symbol = opts.symbol.toUpperCase();
+      const hours = parseInt(opts.hours);
+      const exchanges = opts.exchange
+        ? [opts.exchange.toLowerCase()]
+        : ["hyperliquid", "pacifica", "lighter"];
+
+      const endTime = new Date();
+      const startTime = new Date(endTime.getTime() - hours * 60 * 60 * 1000);
+
+      if (isJson()) {
+        const data: Record<string, { ts: string; rate: number; hourlyRate: number }[]> = {};
+        for (const ex of exchanges) {
+          const rates = getHistoricalRates(symbol, ex, startTime, endTime);
+          if (rates.length > 0) data[ex] = rates;
+        }
+        return printJson(jsonOk({ symbol, hours, startTime: startTime.toISOString(), endTime: endTime.toISOString(), rates: data }));
+      }
+
+      console.log(chalk.cyan.bold(`  ${symbol} Funding Rate History (last ${hours}h)\n`));
+
+      const exAbbr = (e: string) => e === "pacifica" ? "PAC" : e === "hyperliquid" ? "HL" : "LT";
+      let hasData = false;
+
+      for (const ex of exchanges) {
+        const rates = getHistoricalRates(symbol, ex, startTime, endTime);
+        if (rates.length === 0) continue;
+        hasData = true;
+
+        console.log(chalk.white.bold(`  ${exAbbr(ex)} (${rates.length} snapshots):`));
+
+        const rows = rates.map(r => {
+          const date = new Date(r.ts);
+          const timeStr = date.toLocaleString();
+          const hourlyPct = (r.hourlyRate * 100).toFixed(6);
+          const annualPct = (r.hourlyRate * 24 * 365 * 100).toFixed(2);
+          const color = r.rate > 0 ? chalk.red : r.rate < 0 ? chalk.green : chalk.white;
+          return [
+            chalk.gray(timeStr),
+            color(formatPercent(r.rate)),
+            `${hourlyPct}%/h`,
+            `${annualPct}%/yr`,
+          ];
+        });
+
+        console.log(makeTable(["Time", "Raw Rate", "Hourly", "Annualized"], rows));
+        console.log();
+      }
+
+      if (!hasData) {
+        console.log(chalk.gray(`  No historical data found for ${symbol} in the last ${hours}h.`));
+        console.log(chalk.gray(`  Run 'perp funding rates' to start collecting data.\n`));
+      }
     });
 
   // ── perp funding monitor ── (live refreshing)
@@ -209,6 +279,25 @@ export function registerFundingCommands(
 
 // ── Display helpers ──
 
+function formatAvgRate(rate: number | null | undefined): string {
+  if (rate == null) return chalk.gray("-");
+  const annualPct = rate * 24 * 365 * 100;
+  const color = annualPct > 0 ? chalk.red : annualPct < 0 ? chalk.green : chalk.white;
+  return color(`${annualPct.toFixed(1)}%`);
+}
+
+/** Compute an "average spread" across rates that have avg24h data. */
+function getAvgSpread(s: SymbolFundingComparison, windowKey: "avg8h" | "avg24h" | "avg7d"): string {
+  const avgs = s.rates
+    .filter(r => r.historicalAvg?.[windowKey] != null)
+    .map(r => r.historicalAvg![windowKey]!);
+  if (avgs.length < 2) return chalk.gray("-");
+  const maxH = Math.max(...avgs);
+  const minH = Math.min(...avgs);
+  const spreadPct = (maxH - minH) * 24 * 365 * 100;
+  return `${spreadPct.toFixed(1)}%`;
+}
+
 function printSnapshotTable(snapshot: FundingRateSnapshot): void {
   const exAbbr = (e: string) => e === "pacifica" ? "PAC" : e === "hyperliquid" ? "HL" : "LT";
 
@@ -225,6 +314,13 @@ function printSnapshotTable(snapshot: FundingRateSnapshot): void {
       : s.maxSpreadAnnual >= 10 ? chalk.yellow
       : chalk.white;
 
+    // Use the highest-spread pair's historical averages for the avg columns
+    // Show the best exchange's avg for quick reference
+    const bestRate = hlRate ?? pacRate ?? ltRate;
+    const avg8h = bestRate?.historicalAvg?.avg8h;
+    const avg24h = bestRate?.historicalAvg?.avg24h;
+    const avg7d = bestRate?.historicalAvg?.avg7d;
+
     return [
       chalk.white.bold(s.symbol),
       pacRate ? formatPercent(pacRate.fundingRate) : chalk.gray("-"),
@@ -232,16 +328,20 @@ function printSnapshotTable(snapshot: FundingRateSnapshot): void {
       ltRate ? formatPercent(ltRate.fundingRate) : chalk.gray("-"),
       spreadColor(`${s.maxSpreadAnnual.toFixed(1)}%`),
       s.maxSpreadAnnual >= 5 ? `${exAbbr(s.shortExchange)}>${exAbbr(s.longExchange)}` : chalk.gray("-"),
+      formatAvgRate(avg8h),
+      formatAvgRate(avg24h),
+      formatAvgRate(avg7d),
     ];
   });
 
   console.log(makeTable(
-    ["Symbol", "Pacifica", "Hyperliquid", "Lighter", "Ann. Spread", "Direction"],
+    ["Symbol", "Pacifica", "Hyperliquid", "Lighter", "Ann. Spread", "Direction", "Avg 8h", "Avg 24h", "Avg 7d"],
     rows,
   ));
 
   console.log(chalk.gray(`\n  ${snapshot.symbols.length} symbols compared across exchanges.`));
-  console.log(chalk.gray(`  Rates: PAC/LT = per 8h | HL = per 1h. Spread is normalized.\n`));
+  console.log(chalk.gray(`  Rates: PAC/LT = per 8h | HL = per 1h. Spread is normalized.`));
+  console.log(chalk.gray(`  Avg columns show best exchange's historical hourly rate annualized.\n`));
 }
 
 function printExchangeStatus(snapshot: FundingRateSnapshot): void {
@@ -261,13 +361,31 @@ function printDetailedComparison(comparison: SymbolFundingComparison): void {
   for (const r of comparison.rates) {
     const hourlyPct = (r.hourlyRate * 100).toFixed(6);
     const annualPct = r.annualizedPct.toFixed(2);
+    const compHours = getExchangeCompoundingHours(r.exchange);
+    const compoundedReturn = getCompoundedAnnualReturn(r.hourlyRate, compHours);
+    const compoundedPct = (compoundedReturn * 100).toFixed(2);
     const color = r.fundingRate > 0 ? chalk.red : r.fundingRate < 0 ? chalk.green : chalk.white;
 
     console.log(`  ${chalk.white.bold(exAbbr(r.exchange).padEnd(4))} ` +
       `Raw: ${color(formatPercent(r.fundingRate).padEnd(14))} ` +
       `Hourly: ${hourlyPct}%  ` +
-      `Annual: ${annualPct}%`
+      `Annual: ${annualPct}%  ` +
+      `APY(compounded): ${compoundedPct}%`
     );
+  }
+
+  // Show historical averages if available
+  const hasHistorical = comparison.rates.some(r => r.historicalAvg != null);
+  if (hasHistorical) {
+    console.log(chalk.cyan("\n  Historical Averages (annualized):"));
+    for (const r of comparison.rates) {
+      if (!r.historicalAvg) continue;
+      const avg8h = r.historicalAvg.avg8h != null ? `${(r.historicalAvg.avg8h * 24 * 365 * 100).toFixed(1)}%` : "-";
+      const avg24h = r.historicalAvg.avg24h != null ? `${(r.historicalAvg.avg24h * 24 * 365 * 100).toFixed(1)}%` : "-";
+      const avg7d = r.historicalAvg.avg7d != null ? `${(r.historicalAvg.avg7d * 24 * 365 * 100).toFixed(1)}%` : "-";
+      console.log(`  ${chalk.white.bold(exAbbr(r.exchange).padEnd(4))} ` +
+        `8h: ${avg8h.padEnd(10)} 24h: ${avg24h.padEnd(10)} 7d: ${avg7d}`);
+    }
   }
 
   console.log();
@@ -286,5 +404,6 @@ function printDetailedComparison(comparison: SymbolFundingComparison): void {
     const daily = (comparison.estHourlyIncomeUsd / 1000) * size * 24;
     console.log(chalk.gray(`    $${formatUsd(size)} notional -> $${daily.toFixed(2)}/day`));
   }
-  console.log();
+
+  console.log(chalk.gray("\n  * Rates shown are current predictions. Actual settled rates may differ.\n"));
 }

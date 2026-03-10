@@ -7,6 +7,7 @@
  */
 
 import { toHourlyRate, computeAnnualSpread, estimateHourlyFunding } from "./funding.js";
+import { saveFundingSnapshot, getHistoricalAverages, type HistoricalAverages } from "./funding-history.js";
 
 // ── API URLs ──
 
@@ -24,6 +25,7 @@ export interface ExchangeFundingRate {
   annualizedPct: number;     // annualized percentage
   markPrice: number;
   nextFundingTime?: number;  // unix ms, if available
+  historicalAvg?: HistoricalAverages;  // avg rates over time windows
 }
 
 export interface SymbolFundingComparison {
@@ -167,14 +169,38 @@ export async function fetchAllFundingRates(opts?: {
     fetchLighterRates().then(r => { exchangeStatus.lighter = r.length > 0 ? "ok" : "error"; return r; }),
   ]);
 
+  // Persist snapshot for historical tracking
+  const allRates = [...pacRates, ...hlRates, ...ltRates];
+  try {
+    saveFundingSnapshot(allRates);
+  } catch {
+    // Non-critical: don't fail the command if persistence fails
+  }
+
   // Build per-symbol rate map
   const rateMap = new Map<string, ExchangeFundingRate[]>();
-  for (const r of [...pacRates, ...hlRates, ...ltRates]) {
+  for (const r of allRates) {
     if (!r.symbol) continue;
     if (opts?.symbols && !opts.symbols.includes(r.symbol.toUpperCase())) continue;
     const key = r.symbol.toUpperCase();
     if (!rateMap.has(key)) rateMap.set(key, []);
     rateMap.get(key)!.push(r);
+  }
+
+  // Attach historical averages when available
+  try {
+    const symbols = Array.from(rateMap.keys());
+    const exchanges = ["pacifica", "hyperliquid", "lighter"];
+    const historicals = getHistoricalAverages(symbols, exchanges);
+    for (const [, rates] of rateMap) {
+      for (const r of rates) {
+        const key = `${r.symbol.toUpperCase()}:${r.exchange}`;
+        const avg = historicals.get(key);
+        if (avg) r.historicalAvg = avg;
+      }
+    }
+  } catch {
+    // Non-critical
   }
 
   const comparisons: SymbolFundingComparison[] = [];
