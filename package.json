@@ -34,7 +34,6 @@
   "engines": {
     "node": "^20.0.0 || ^22.0.0"
   },
-  "packageManager": "pnpm@10.12.1",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.27.1",
     "@msgpack/msgpack": "^3.1.3",
