@@ -186,12 +186,13 @@ async function pollArbData(): Promise<DashboardSnapshot["arb"]> {
  * Poll all exchanges and return a unified snapshot.
  */
 async function pollSnapshot(exchanges: DashboardExchange[]): Promise<DashboardSnapshot> {
+  const emptyBalance: ExchangeBalance = { equity: "0", available: "0", marginUsed: "0", unrealizedPnl: "0" };
   const results = await Promise.allSettled(
     exchanges.map(async (ex) => {
       const [balance, positions, orders, markets] = await Promise.all([
-        ex.adapter.getBalance(),
-        ex.adapter.getPositions(),
-        ex.adapter.getOpenOrders(),
+        ex.adapter.getBalance().catch(() => emptyBalance),
+        ex.adapter.getPositions().catch(() => [] as ExchangePosition[]),
+        ex.adapter.getOpenOrders().catch(() => [] as ExchangeOrder[]),
         ex.adapter.getMarkets().then((m) => m.slice(0, 10)).catch(() => [] as ExchangeMarketInfo[]),
       ]);
       return { name: ex.name, balance, positions, orders, topMarkets: markets };
