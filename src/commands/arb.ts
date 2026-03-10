@@ -1,7 +1,7 @@
 import { Command } from "commander";
 import { makeTable, formatUsd, formatPercent, formatPnl, printJson, jsonOk } from "../utils.js";
 import chalk from "chalk";
-import { annualizeRate, computeAnnualSpread } from "../funding.js";
+import { annualizeRate, computeAnnualSpread, toHourlyRate } from "../funding.js";
 import { scanDexArb, type DexArbPair } from "../dex-asset-map.js";
 
 interface FundingRate {
@@ -139,8 +139,8 @@ export function registerArbCommands(
       for (const [symbol, rates] of rateMap.entries()) {
         if (rates.length < 2) continue;
 
-        // Find min and max funding rate exchange
-        rates.sort((a, b) => a.fundingRate - b.fundingRate);
+        // Find min and max funding rate exchange (normalize to hourly for comparison)
+        rates.sort((a, b) => toHourlyRate(a.fundingRate, a.exchange) - toHourlyRate(b.fundingRate, b.exchange));
         const lowest = rates[0];
         const highest = rates[rates.length - 1];
 
@@ -154,11 +154,11 @@ export function registerArbCommands(
         if (annualSpread >= parseFloat(opts.minSpread)) {
           opportunities.push({
             symbol,
-            longExchange: highest.exchange,   // short funding = you get paid going long
-            shortExchange: lowest.exchange,    // long funding = you get paid going short
-            longRate: highest.fundingRate,
-            shortRate: lowest.fundingRate,
-            spread: highest.fundingRate - lowest.fundingRate,
+            longExchange: lowest.exchange,    // long where funding is lowest (you pay less / receive more)
+            shortExchange: highest.exchange,  // short where funding is highest (you receive more / pay less)
+            longRate: lowest.fundingRate,
+            shortRate: highest.fundingRate,
+            spread: toHourlyRate(highest.fundingRate, highest.exchange) - toHourlyRate(lowest.fundingRate, lowest.exchange),
             annualSpread,
             markPrice: highest.markPrice || lowest.markPrice,
           });
@@ -175,7 +175,7 @@ export function registerArbCommands(
       }
 
       console.log(chalk.cyan.bold("  Funding Rate Arbitrage Opportunities\n"));
-      console.log(chalk.gray(`  Strategy: Long on high-funding exchange, Short on low-funding exchange\n`));
+      console.log(chalk.gray(`  Strategy: Long on low-funding exchange, Short on high-funding exchange\n`));
 
       const rows = opportunities.map((o) => [
         chalk.white.bold(o.symbol),
@@ -194,7 +194,7 @@ export function registerArbCommands(
         )
       );
 
-      console.log(chalk.gray("\n  Note: Rates normalized (HL=hourly, LT/PAC=8h) before annualizing.\n"));
+      console.log(chalk.gray("\n  Note: All rates are hourly. Normalized before annualizing.\n"));
     });
 
   arb
