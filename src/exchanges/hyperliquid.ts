@@ -201,8 +201,6 @@ export class HyperliquidAdapter implements ExchangeAdapter {
     const margin = (s?.marginSummary ?? {}) as Record<string, unknown>;
     const cross = (s?.crossMarginSummary ?? {}) as Record<string, unknown>;
 
-    let equity = Number(margin.accountValue ?? cross.accountValue ?? 0);
-    let available = Number(s?.withdrawable ?? 0);
     const marginUsed = Number(margin.totalMarginUsed ?? cross.totalMarginUsed ?? 0);
     // Sum unrealized PnL directly from positions (reliable for both main + dex accounts)
     const positions = (s?.assetPositions ?? []) as Record<string, unknown>[];
@@ -212,23 +210,29 @@ export class HyperliquidAdapter implements ExchangeAdapter {
       unrealizedPnl += Number(pos.unrealizedPnl ?? 0);
     }
 
-    // Unified account: always include spot USDC balance (perp + spot)
+    let equity: number;
+    let available: number;
+
     if (!this._dex) {
+      // Unified account: spot USDC total IS the true equity (includes perp margin as "hold").
+      // perp accountValue is a subset — adding both double-counts.
       try {
         const spotState = await this.sdk.info.spot.getSpotClearinghouseState(this._address);
         const balances = spotState?.balances ?? [];
         const usdc = balances.find((b: Record<string, unknown>) => String(b.coin).startsWith("USDC"));
-        if (usdc) {
-          const spotTotal = Number(usdc.total ?? 0);
-          const spotHold = Number(usdc.hold ?? 0);
-          if (spotTotal > 0) {
-            equity += spotTotal;
-            available += spotTotal - spotHold;
-          }
-        }
+        const spotTotal = Number(usdc?.total ?? 0);
+        const spotHold = Number(usdc?.hold ?? 0);
+        equity = spotTotal > 0 ? spotTotal : Number(margin.accountValue ?? cross.accountValue ?? 0);
+        available = spotTotal > 0 ? spotTotal - spotHold : Number(s?.withdrawable ?? 0);
       } catch {
-        // non-critical
+        // Spot API failed — fall back to perp-only values
+        equity = Number(margin.accountValue ?? cross.accountValue ?? 0);
+        available = Number(s?.withdrawable ?? 0);
       }
+    } else {
+      // Dex account: perp clearinghouse is the only source
+      equity = Number(margin.accountValue ?? cross.accountValue ?? 0);
+      available = Number(s?.withdrawable ?? 0);
     }
 
     return {

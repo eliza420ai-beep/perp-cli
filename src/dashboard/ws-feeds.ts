@@ -470,14 +470,13 @@ class PacificaFeed extends ExchangeWsFeed {
 }
 
 // ── Lighter WS Feed ──
-// WS: wss://mainnet.zklighter.elliot.ai/stream?encoding=json
+// WS: wss://mainnet.zklighter.elliot.ai/stream
 // Auth: signer.createAuthToken() passed as `auth` field in subscribe messages
-// Channels: account_all_positions_fe/{index}, account_all_orders/{index}
-// Balance: REST (account_all_assets doesn't include balance summary)
+// Channels: account_all_positions/{index} (auth), account_all_orders/{index} (auth),
+//           user_stats/{index} (public — balance info)
 
 class LighterFeed extends ExchangeWsFeed {
   private accountIndex: number;
-  private balanceTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(exchange: DashboardExchange, onUpdate: (state: WsFeedState) => void) {
     super(exchange, onUpdate);
@@ -485,7 +484,7 @@ class LighterFeed extends ExchangeWsFeed {
     this.accountIndex = Number(adapter._accountIndex ?? -1);
   }
 
-  get wsUrl() { return "wss://mainnet.zklighter.elliot.ai/stream?encoding=json&readonly=true"; }
+  get wsUrl() { return "wss://mainnet.zklighter.elliot.ai/stream"; }
 
   private async getAuthToken(): Promise<string | null> {
     try {
@@ -522,18 +521,18 @@ class LighterFeed extends ExchangeWsFeed {
 
         this.ws.on("open", () => {
           this.state.mode = "ws";
-          // Subscribe to account channels with auth token
-          const channels = [
-            `account_all_positions_fe/${this.accountIndex}`,
+          // Subscribe to authenticated channels (positions + orders)
+          const authChannels = [
+            `account_all_positions/${this.accountIndex}`,
             `account_all_orders/${this.accountIndex}`,
           ];
-          for (const channel of channels) {
+          for (const channel of authChannels) {
             this.ws!.send(JSON.stringify({ type: "subscribe", channel, auth: authToken }));
           }
+          // Subscribe to public channel for balance (no auth needed)
+          this.ws!.send(JSON.stringify({ type: "subscribe", channel: `user_stats/${this.accountIndex}` }));
           // Start data timeout — switch to REST if no data within 5s
           this.startWsDataTimeout();
-          // Balance via REST (WS account_all_assets doesn't include balance summary)
-          this.startBalancePolling();
           resolve();
         });
 
@@ -545,7 +544,6 @@ class LighterFeed extends ExchangeWsFeed {
         });
 
         this.ws.on("close", () => {
-          this.stopBalancePolling();
           if (!this.closed) {
             this.startRestFallback();
             this.scheduleReconnect();
@@ -565,30 +563,26 @@ class LighterFeed extends ExchangeWsFeed {
     });
   }
 
-  /** Poll balance via REST (WS doesn't provide balance summary) */
-  private startBalancePolling() {
-    if (this.balanceTimer) return;
-    const pollBalance = async () => {
-      try {
-        this.state.balance = await this.exchange.adapter.getBalance();
-      } catch { /* ignore */ }
-    };
-    pollBalance(); // immediate
-    this.balanceTimer = setInterval(pollBalance, 5000);
-  }
-
-  private stopBalancePolling() {
-    if (this.balanceTimer) { clearInterval(this.balanceTimer); this.balanceTimer = null; }
-  }
-
   /** Cached position map: market_id → position data (for incremental updates) */
   private positionMap = new Map<string, Record<string, unknown>>();
 
   private handleMessage(msg: Record<string, unknown>) {
     const type = String(msg.type ?? "");
 
+    // Balance: user_stats channel (public, no auth) provides portfolio_value, available_balance, etc.
+    if (type.includes("user_stats")) {
+      const stats = (msg.stats ?? msg) as Record<string, unknown>;
+      // total_stats includes cross-margin + isolated totals
+      const src = (stats.total_stats ?? stats) as Record<string, unknown>;
+      const equity = String(src.portfolio_value ?? src.collateral ?? this.state.balance.equity);
+      const available = String(src.available_balance ?? this.state.balance.available);
+      const marginUsed = String(src.margin_usage ?? this.state.balance.marginUsed);
+      this.state.balance = { equity, available, marginUsed, unrealizedPnl: this.state.balance.unrealizedPnl };
+      this.emitUpdate();
+    }
+
     // Positions: subscribed/ = full snapshot, update/ = incremental
-    if (type.includes("account_all_positions_fe")) {
+    if (type.includes("account_all_positions")) {
       const positions = msg.positions as Record<string, Record<string, unknown>> | undefined;
       if (positions) {
         const isSnapshot = type.startsWith("subscribed/");
@@ -631,28 +625,24 @@ class LighterFeed extends ExchangeWsFeed {
 
     // Orders: subscribed/ = full snapshot, update/ = incremental
     if (type.includes("account_all_orders")) {
-      const orders = msg.orders as Record<string, Record<string, unknown>> | undefined;
-      if (orders && Object.keys(orders).length > 0) {
-        this.state.orders = Object.values(orders)
-          .filter(o => String(o.status ?? "") === "open" || String(o.order_status ?? "") === "open")
+      const orders = msg.orders as Record<string, Record<string, unknown>[]> | undefined;
+      if (orders) {
+        const allOrders = Object.values(orders).flat();
+        this.state.orders = allOrders
+          .filter(o => String(o.status ?? "") === "open")
           .map(o => ({
-            orderId: String(o.order_id ?? o.id ?? ""),
+            orderId: String(o.order_id ?? o.order_index ?? ""),
             symbol: String(o.symbol ?? ""),
-            side: (Number(o.is_ask) === 0 ? "buy" : "sell") as "buy" | "sell",
+            side: (o.side === "buy" || o.is_ask === false ? "buy" : "sell") as "buy" | "sell",
             price: String(o.price ?? "0"),
-            size: String(o.size ?? o.remaining_base_amount ?? ""),
-            filled: String(o.filled ?? "0"),
+            size: String(o.remaining_base_amount ?? o.initial_base_amount ?? ""),
+            filled: String(o.filled_base_amount ?? "0"),
             status: "open",
             type: String(o.type ?? "limit"),
           }));
         this.emitUpdate();
       }
     }
-  }
-
-  close() {
-    this.stopBalancePolling();
-    super.close();
   }
 }
 

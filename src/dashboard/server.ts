@@ -258,11 +258,18 @@ function mergeAndTotal(exchangeData: DashboardSnapshot["exchanges"]): DashboardS
     // Main accountValue already includes dex pool funds — DON'T add dex balances (would double-count).
     // Only merge positions/orders, and attach dex breakdown for UI display.
     const dexBalances: { name: string; balance: ExchangeBalance }[] = [];
+    let dexPnlSum = 0;
     for (const dex of dexEntries) {
       const dexName = dex.name.replace("hl:", "");
       dexBalances.push({ name: dexName, balance: { ...dex.balance } });
       hlEntry.positions.push(...dex.positions);
       hlEntry.orders.push(...dex.orders);
+      dexPnlSum += Number(dex.balance.unrealizedPnl) || 0;
+    }
+    // Add dex unrealizedPnl to main HL balance (equity already includes dex funds, but PnL doesn't)
+    if (dexPnlSum !== 0) {
+      const hlPnl = Number(hlEntry.balance.unrealizedPnl) || 0;
+      hlEntry.balance = { ...hlEntry.balance, unrealizedPnl: String(hlPnl + dexPnlSum) };
     }
     if (dexEntries.length > 0) {
       (hlEntry as Record<string, unknown>).dexBalances = dexBalances;
