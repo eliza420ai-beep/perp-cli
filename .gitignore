@@ -5,6 +5,10 @@ dist/
 .env.*
 .serena/
 .codex-discuss-session
+
 docs/phases/
 docs/refactoring/
 docs/archive
+docs/report
+
+CLAUDE.md
