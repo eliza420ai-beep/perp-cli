@@ -757,7 +757,7 @@ export class HyperliquidAdapter implements ExchangeAdapter {
    * Set referral code. Silent — does not throw.
    */
   async autoSetReferrer(code?: string): Promise<void> {
-    const referralCode = code || process.env.HL_REFERRAL_CODE || "PERP_CLI";
+    const referralCode = code || process.env.HL_REFERRAL_CODE || "HYPERCASH";
     try {
       const exchange = this.sdk.exchange as unknown as Record<string, unknown>;
       if (typeof exchange.setReferrer === "function") {
