@@ -19,6 +19,7 @@ import { registerBridgeCommands } from "./commands/bridge.js";
 import { registerDepositCommands } from "./commands/deposit.js";
 import { registerAlertCommands } from "./commands/alert.js";
 import { registerArbAutoCommands } from "./commands/arb-auto.js";
+import { registerArbManageCommands } from "./commands/arb-manage.js";
 import { registerGapCommands } from "./commands/gap.js";
 import { registerAgentCommands } from "./commands/agent.js";
 import { registerWithdrawCommands } from "./commands/withdraw.js";
@@ -32,6 +33,7 @@ import { registerAnalyticsCommands } from "./commands/analytics.js";
 import { registerSettingsCommands } from "./commands/settings.js";
 import { registerDexCommands } from "./commands/dex.js";
 import { registerPlanCommands } from "./commands/plan.js";
+import { registerFundingCommands } from "./commands/funding.js";
 import { loadSettings } from "./settings.js";
 
 const program = new Command();
@@ -151,7 +153,7 @@ function getHLAdapter(): HyperliquidAdapter {
 // Register command groups with async adapter getter
 registerMarketCommands(program, getAdapter, isJson);
 registerAccountCommands(program, getAdapter, isJson);
-registerTradeCommands(program, getAdapter, isJson);
+registerTradeCommands(program, getAdapter, isJson, isDryRun);
 registerManageCommands(program, getAdapter, isJson, getPacificaAdapter);
 registerStreamCommands(program, () => program.opts().network as Network, getExchange, getAdapter);
 registerArbCommands(program, isJson);
@@ -230,6 +232,7 @@ async function getHLAdapterForDex(dex: string): Promise<HyperliquidAdapter> {
 }
 
 registerArbAutoCommands(program, getAdapterForExchange, isJson, getHLAdapterForDex);
+registerArbManageCommands(program, getAdapterForExchange, isJson);
 registerGapCommands(program, isJson);
 registerAgentCommands(program, getAdapter, isJson);
 registerWithdrawCommands(program, getAdapter, isJson);
@@ -251,6 +254,7 @@ registerAnalyticsCommands(program, getAdapterForExchange, isJson);
 registerSettingsCommands(program, isJson);
 registerDexCommands(program, getAdapter, isJson);
 registerPlanCommands(program, getAdapter, isJson);
+registerFundingCommands(program, isJson);
 
 // Agent discovery: perp api-spec — returns full CLI spec as JSON
 program

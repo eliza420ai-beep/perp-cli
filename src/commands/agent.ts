@@ -313,35 +313,19 @@ export function registerAgentCommands(
         cli_version: "0.1.0",
       };
 
-      // Check Pacifica API
-      try {
-        const start = Date.now();
-        const res = await fetch("https://api.pacifica.fi/api/v1/info/prices");
-        results.pacifica = {
-          status: res.ok ? "ok" : "error",
-          latency_ms: Date.now() - start,
-          http_status: res.status,
-        };
-      } catch (err) {
-        results.pacifica = { status: "unreachable", error: err instanceof Error ? err.message : String(err) };
-      }
-
-      // Check Hyperliquid API
-      try {
-        const start = Date.now();
-        const res = await fetch("https://api.hyperliquid.xyz/info", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ type: "allMids" }),
-        });
-        results.hyperliquid = {
-          status: res.ok ? "ok" : "error",
-          latency_ms: Date.now() - start,
-          http_status: res.status,
-        };
-      } catch (err) {
-        results.hyperliquid = { status: "unreachable", error: err instanceof Error ? err.message : String(err) };
-      }
+      // Check exchange APIs
+      const { pingPacifica, pingHyperliquid } = await import("../shared-api.js");
+      const [pacPing, hlPing] = await Promise.all([pingPacifica(), pingHyperliquid()]);
+      results.pacifica = {
+        status: pacPing.ok ? "ok" : "error",
+        latency_ms: pacPing.latencyMs,
+        http_status: pacPing.status,
+      };
+      results.hyperliquid = {
+        status: hlPing.ok ? "ok" : "error",
+        latency_ms: hlPing.latencyMs,
+        http_status: hlPing.status,
+      };
 
       // Check relayer
       try {

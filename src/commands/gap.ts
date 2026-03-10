@@ -1,6 +1,11 @@
 import { Command } from "commander";
 import chalk from "chalk";
 import { printJson, jsonOk } from "../utils.js";
+import {
+  fetchPacificaPricesRaw, parsePacificaRaw,
+  fetchHyperliquidAllMidsRaw,
+  fetchLighterOrderBookDetailsRaw,
+} from "../shared-api.js";
 
 interface PriceSnapshot {
   symbol: string;
@@ -15,34 +20,16 @@ interface PriceSnapshot {
 
 async function fetchAllPrices(): Promise<PriceSnapshot[]> {
   const [pacRes, hlRes, ltRes] = await Promise.all([
-    fetch("https://api.pacifica.fi/api/v1/info/prices")
-      .then((r) => r.json())
-      .catch(() => null),
-    fetch("https://api.hyperliquid.xyz/info", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ type: "allMids" }),
-    })
-      .then((r) => r.json())
-      .catch(() => null),
-    fetch("https://mainnet.zklighter.elliot.ai/api/v1/orderBookDetails")
-      .then((r) => r.json())
-      .catch(() => null),
+    fetchPacificaPricesRaw(),
+    fetchHyperliquidAllMidsRaw(),
+    fetchLighterOrderBookDetailsRaw(),
   ]);
 
-  const pacPrices = new Map<string, number>();
-  if (Array.isArray(pacRes?.data ?? pacRes)) {
-    for (const p of (pacRes.data ?? pacRes) as Record<string, unknown>[]) {
-      const mark = Number(p.mark ?? p.price ?? 0);
-      if (mark > 0) pacPrices.set(String(p.symbol), mark);
-    }
-  }
+  const { prices: pacPrices } = parsePacificaRaw(pacRes);
 
   const hlPrices = new Map<string, number>();
   if (hlRes && typeof hlRes === "object" && !Array.isArray(hlRes)) {
-    for (const [symbol, price] of Object.entries(
-      hlRes as Record<string, string>
-    )) {
+    for (const [symbol, price] of Object.entries(hlRes as Record<string, string>)) {
       const p = Number(price);
       if (p > 0) hlPrices.set(symbol, p);
     }
@@ -50,10 +37,9 @@ async function fetchAllPrices(): Promise<PriceSnapshot[]> {
 
   const ltPrices = new Map<string, number>();
   if (ltRes) {
-    const details = (ltRes as Record<string, unknown>).order_book_details ??
-      (ltRes as Record<string, unknown>).orderBookDetails ?? [];
-    for (const m of details as Array<Record<string, unknown>>) {
-      const sym = String(m.symbol ?? m.ticker ?? "").replace(/_USDC$/, "");
+    const details = ((ltRes as Record<string, unknown>).order_book_details ?? []) as Array<Record<string, unknown>>;
+    for (const m of details) {
+      const sym = String(m.symbol ?? "").replace(/_USDC$/, "");
       const price = Number(m.last_trade_price ?? m.mark_price ?? 0);
       if (sym && price > 0) ltPrices.set(sym, price);
     }

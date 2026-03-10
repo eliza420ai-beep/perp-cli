@@ -4,6 +4,10 @@ import { updateJobState } from "../jobs.js";
 import { fetchAllBalances, computeRebalancePlan, hasEnoughBalance, type ExchangeBalanceSnapshot } from "../rebalance.js";
 import { checkArbLiquidity } from "../liquidity.js";
 import { computeAnnualSpread, toHourlyRate } from "../funding.js";
+import {
+  fetchPacificaPrices, fetchHyperliquidMeta,
+  fetchLighterOrderBookDetails, fetchLighterFundingRates,
+} from "../shared-api.js";
 import { computeMatchedSize, reconcileArbFills } from "../arb-sizing.js";
 
 export interface FundingArbParams {
@@ -37,15 +41,28 @@ interface ArbPosition {
   entryPrices: { long: number; short: number };
 }
 
-const PACIFICA_URL = "https://api.pacifica.fi/api/v1/info/prices";
-const HL_URL = "https://api.hyperliquid.xyz/info";
-const LIGHTER_URL = "https://mainnet.zklighter.elliot.ai";
-
 async function fetchAllRates(): Promise<FundingRate[]> {
   const [pacRates, hlRates, ltRates] = await Promise.allSettled([
-    fetchPacifica(),
-    fetchHyperliquid(),
-    fetchLighter(),
+    fetchPacificaPrices().then(assets => assets.map(p => ({
+      exchange: "pacifica", symbol: p.symbol, fundingRate: p.funding, markPrice: p.mark,
+    }))),
+    fetchHyperliquidMeta().then(assets => assets.map(a => ({
+      exchange: "hyperliquid", symbol: a.symbol, fundingRate: a.funding, markPrice: a.markPx,
+    }))),
+    (async () => {
+      const [details, funding] = await Promise.all([
+        fetchLighterOrderBookDetails(),
+        fetchLighterFundingRates(),
+      ]);
+      const priceMap = new Map(details.map(d => [d.marketId, d.lastTradePrice]));
+      const symMap = new Map(details.map(d => [d.marketId, d.symbol]));
+      return funding.map(fr => ({
+        exchange: "lighter",
+        symbol: fr.symbol || symMap.get(fr.marketId) || "",
+        fundingRate: fr.rate,
+        markPrice: fr.markPrice || priceMap.get(fr.marketId) || 0,
+      }));
+    })(),
   ]);
 
   return [
@@ -53,70 +70,6 @@ async function fetchAllRates(): Promise<FundingRate[]> {
     ...(hlRates.status === "fulfilled" ? hlRates.value : []),
     ...(ltRates.status === "fulfilled" ? ltRates.value : []),
   ];
-}
-
-async function fetchPacifica(): Promise<FundingRate[]> {
-  const res = await fetch(PACIFICA_URL);
-  const json = await res.json();
-  const data = json.data ?? json;
-  if (!Array.isArray(data)) return [];
-  return data.map((p: Record<string, unknown>) => ({
-    exchange: "pacifica",
-    symbol: String(p.symbol ?? ""),
-    fundingRate: Number(p.funding ?? 0),
-    markPrice: Number(p.mark ?? 0),
-  }));
-}
-
-async function fetchHyperliquid(): Promise<FundingRate[]> {
-  const res = await fetch(HL_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ type: "metaAndAssetCtxs" }),
-  });
-  const json = await res.json();
-  const universe = json[0]?.universe ?? [];
-  const ctxs = json[1] ?? [];
-  return universe.map((a: Record<string, unknown>, i: number) => {
-    const ctx = (ctxs[i] ?? {}) as Record<string, unknown>;
-    return {
-      exchange: "hyperliquid",
-      symbol: String(a.name ?? ""),
-      fundingRate: Number(ctx.funding ?? 0),
-      markPrice: Number(ctx.markPx ?? 0),
-    };
-  });
-}
-
-async function fetchLighter(): Promise<FundingRate[]> {
-  const [detailsRes, fundingRes] = await Promise.all([
-    fetch(`${LIGHTER_URL}/api/v1/orderBookDetails`).then((r) => r.json()),
-    fetch(`${LIGHTER_URL}/api/v1/funding-rates`).then((r) => r.json()),
-  ]);
-
-  const idToMeta = new Map<number, { symbol: string; price: number }>();
-  const details = (detailsRes as Record<string, unknown>).order_book_details ?? [];
-  for (const m of details as Array<Record<string, unknown>>) {
-    const marketId = Number(m.market_id);
-    const sym = String(m.symbol ?? "");
-    const price = Number(m.last_trade_price ?? 0);
-    if (sym) idToMeta.set(marketId, { symbol: sym, price });
-  }
-
-  const rates: FundingRate[] = [];
-  const fundingList = (fundingRes as Record<string, unknown>).funding_rates ?? [];
-  for (const fr of fundingList as Array<Record<string, unknown>>) {
-    const marketId = Number(fr.market_id);
-    const symbol = String(fr.symbol ?? "") || idToMeta.get(marketId)?.symbol;
-    if (!symbol) continue;
-    rates.push({
-      exchange: "lighter",
-      symbol,
-      fundingRate: Number(fr.rate ?? fr.funding_rate ?? 0),
-      markPrice: idToMeta.get(marketId)?.price ?? 0,
-    });
-  }
-  return rates;
 }
 
 // annualize: use computeAnnualSpread from funding.ts for cross-exchange comparison

@@ -117,45 +117,52 @@ export async function fetchAllDexAssets(): Promise<DexAsset[]> {
     dexNames.push(colon > 0 ? first.slice(0, colon) : `dex-${i}`);
   }
 
-  // Fetch metaAndAssetCtxs for each dex in parallel
-  const fetches = dexNames.map(async (dex, i) => {
-    if (!dex) return [];
-    try {
-      const body = i === 0
-        ? { type: "metaAndAssetCtxs" }
-        : { type: "metaAndAssetCtxs", dex };
-      const data = await hlInfoPost(body) as [
-        { universe: { name: string; maxLeverage: number; szDecimals: number; isDelisted?: boolean }[] },
-        { markPx: string; funding: string; openInterest: string; dayNtlVlm: string }[],
-      ];
-      const universe = data[0]?.universe ?? [];
-      const ctxs = data[1] ?? [];
-      return universe
-        .map((asset, j): DexAsset | null => {
-          if (asset.isDelisted) return null;
-          const ctx = ctxs[j];
-          const raw = asset.name;
-          const colon = raw.indexOf(":");
-          return {
-            raw,
-            base: colon > 0 ? raw.slice(colon + 1) : raw,
-            dex,
-            markPrice: Number(ctx?.markPx ?? 0),
-            fundingRate: Number(ctx?.funding ?? 0),
-            maxLeverage: asset.maxLeverage,
-            openInterest: Number(ctx?.openInterest ?? 0),
-            volume24h: Number(ctx?.dayNtlVlm ?? 0),
-            szDecimals: asset.szDecimals,
-          };
-        })
-        .filter((a): a is DexAsset => a !== null && a.markPrice > 0);
-    } catch {
-      return [];
-    }
-  });
+  // Fetch metaAndAssetCtxs for each dex in batches of 3 to avoid 429 rate limits
+  const BATCH_SIZE = 3;
+  const allAssets: DexAsset[] = [];
 
-  const results = await Promise.all(fetches);
-  return results.flat();
+  const tasks = dexNames.map((dex, i) => ({ dex, i })).filter(t => t.dex !== "");
+
+  for (let b = 0; b < tasks.length; b += BATCH_SIZE) {
+    const batch = tasks.slice(b, b + BATCH_SIZE);
+    const results = await Promise.all(batch.map(async ({ dex, i }) => {
+      try {
+        const body = i === 0
+          ? { type: "metaAndAssetCtxs" }
+          : { type: "metaAndAssetCtxs", dex };
+        const data = await hlInfoPost(body) as [
+          { universe: { name: string; maxLeverage: number; szDecimals: number; isDelisted?: boolean }[] },
+          { markPx: string; funding: string; openInterest: string; dayNtlVlm: string }[],
+        ];
+        const universe = data[0]?.universe ?? [];
+        const ctxs = data[1] ?? [];
+        return universe
+          .map((asset, j): DexAsset | null => {
+            if (asset.isDelisted) return null;
+            const ctx = ctxs[j];
+            const raw = asset.name;
+            const colon = raw.indexOf(":");
+            return {
+              raw,
+              base: colon > 0 ? raw.slice(colon + 1) : raw,
+              dex,
+              markPrice: Number(ctx?.markPx ?? 0),
+              fundingRate: Number(ctx?.funding ?? 0),
+              maxLeverage: asset.maxLeverage,
+              openInterest: Number(ctx?.openInterest ?? 0),
+              volume24h: Number(ctx?.dayNtlVlm ?? 0),
+              szDecimals: asset.szDecimals,
+            };
+          })
+          .filter((a): a is DexAsset => a !== null && a.markPrice > 0);
+      } catch {
+        return [];
+      }
+    }));
+    allAssets.push(...results.flat());
+  }
+
+  return allAssets;
 }
 
 /**
@@ -215,11 +222,9 @@ export function findDexArbPairs(
         const gapPct = Math.abs(a.markPrice - b.markPrice) / avgPrice * 100;
         if (gapPct > maxGap) continue;
 
-        // HIP-3 deployed dexes settle funding every 8h
-        const fundingHoursA = a.dex === "hl" ? 1 : 8;
-        const fundingHoursB = b.dex === "hl" ? 1 : 8;
-        const hourlyA = a.fundingRate / fundingHoursA;
-        const hourlyB = b.fundingRate / fundingHoursB;
+        // All dexes (including HIP-3 deployed) settle funding every 1h
+        const hourlyA = a.fundingRate;
+        const hourlyB = b.fundingRate;
         const annualSpread = Math.abs(hourlyA - hourlyB) * 8760 * 100;
 
         if (annualSpread < minSpread) continue;

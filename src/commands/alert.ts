@@ -4,6 +4,11 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from "fs";
 import { resolve } from "path";
 import { formatUsd, printJson, jsonOk } from "../utils.js";
 import { computeAnnualSpread } from "../funding.js";
+import {
+  fetchPacificaPricesRaw, parsePacificaRaw,
+  fetchHyperliquidAllMidsRaw,
+  fetchHyperliquidMetaRaw, parseHyperliquidMetaRaw,
+} from "../shared-api.js";
 
 // ── Alert Store ───────────────────────────────────
 
@@ -102,19 +107,12 @@ async function fetchPrices(): Promise<Map<string, number>> {
   const map = new Map<string, number>();
   try {
     const [pacRes, hlRes] = await Promise.all([
-      fetch("https://api.pacifica.fi/api/v1/info/prices").then(r => r.json()).catch(() => null),
-      fetch("https://api.hyperliquid.xyz/info", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ type: "allMids" }),
-      }).then(r => r.json()).catch(() => null),
+      fetchPacificaPricesRaw(),
+      fetchHyperliquidAllMidsRaw(),
     ]);
 
-    if (Array.isArray(pacRes?.data ?? pacRes)) {
-      for (const p of (pacRes.data ?? pacRes) as Record<string, unknown>[]) {
-        map.set(`pac:${String(p.symbol)}`, Number(p.mark ?? 0));
-      }
-    }
+    const { prices: pacPrices } = parsePacificaRaw(pacRes);
+    for (const [sym, price] of pacPrices) map.set(`pac:${sym}`, price);
 
     if (hlRes && typeof hlRes === "object") {
       for (const [symbol, price] of Object.entries(hlRes as Record<string, string>)) {
@@ -140,30 +138,12 @@ async function fetchFundingRates(): Promise<Map<string, { pac: number; hl: numbe
   const map = new Map<string, { pac: number; hl: number; spread: number }>();
   try {
     const [pacRes, hlRes] = await Promise.all([
-      fetch("https://api.pacifica.fi/api/v1/info/prices").then(r => r.json()).catch(() => null),
-      fetch("https://api.hyperliquid.xyz/info", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ type: "metaAndAssetCtxs" }),
-      }).then(r => r.json()).catch(() => null),
+      fetchPacificaPricesRaw(),
+      fetchHyperliquidMetaRaw(),
     ]);
 
-    const pacRates = new Map<string, number>();
-    if (Array.isArray(pacRes?.data ?? pacRes)) {
-      for (const p of (pacRes.data ?? pacRes) as Record<string, unknown>[]) {
-        pacRates.set(String(p.symbol), Number(p.funding ?? 0));
-      }
-    }
-
-    const hlRates = new Map<string, number>();
-    if (hlRes && Array.isArray(hlRes)) {
-      const universe = hlRes[0]?.universe ?? [];
-      const ctxs = hlRes[1] ?? [];
-      universe.forEach((a: Record<string, unknown>, i: number) => {
-        const ctx = (ctxs[i] ?? {}) as Record<string, unknown>;
-        hlRates.set(String(a.name), Number(ctx.funding ?? 0));
-      });
-    }
+    const { rates: pacRates } = parsePacificaRaw(pacRes);
+    const { rates: hlRates } = parseHyperliquidMetaRaw(hlRes);
 
     const allSymbols = new Set([...pacRates.keys(), ...hlRates.keys()]);
     for (const sym of allSymbols) {
