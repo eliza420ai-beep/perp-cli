@@ -24,7 +24,7 @@ const DEFAULTS: Settings = {
   referrals: false,
   referralCodes: {
     pacifica: "",
-    hyperliquid: "PERP_CLI",
+    hyperliquid: "HYPERCASH",
     lighter: "718585MY",
   },
   referralApplied: {
