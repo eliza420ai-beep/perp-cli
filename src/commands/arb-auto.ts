@@ -35,6 +35,144 @@ interface ArbPosition {
   lastCheckTime: number;          // unix ms of last spread check
 }
 
+// ── Fee-Adjusted Net Spread Calculation ──
+
+/** Default taker fee per exchange (as fraction, e.g. 0.00035 = 0.035%) */
+const TAKER_FEES: Record<string, number> = {
+  hyperliquid: 0.00035,
+  pacifica: 0.00035,
+  lighter: 0.00035,
+};
+
+function getTakerFee(exchange: string): number {
+  return TAKER_FEES[exchange.toLowerCase()] ?? 0.00035;
+}
+
+/**
+ * Compute the estimated round-trip cost as a percentage of notional.
+ * Round-trip = 4 × taker fee + 2 × slippage (entry + exit for both legs).
+ */
+export function computeRoundTripCostPct(
+  longExchange: string,
+  shortExchange: string,
+  slippagePct: number = 0.05,
+): number {
+  const longFee = getTakerFee(longExchange) * 100; // convert to pct
+  const shortFee = getTakerFee(shortExchange) * 100;
+  // Entry: long taker + short taker + slippage on each
+  // Exit:  long taker + short taker + slippage on each
+  return 2 * (longFee + shortFee) + 2 * slippagePct;
+}
+
+/**
+ * Compute net annualized spread after deducting round-trip costs amortized over hold period.
+ *
+ * Net = grossAnnualPct - (roundTripCostPct / holdDays * 365) - (bridgeCostPct annualized)
+ *
+ * @param grossAnnualPct - Gross annual spread in %
+ * @param holdDays - Expected holding period in days for cost amortization
+ * @param roundTripCostPct - Total round-trip cost as % of notional
+ * @param bridgeCostUsd - One-way bridge cost in USD (doubled for round-trip)
+ * @param positionSizeUsd - Position size per leg in USD (for bridge cost %)
+ */
+export function computeNetSpread(
+  grossAnnualPct: number,
+  holdDays: number,
+  roundTripCostPct: number,
+  bridgeCostUsd: number = 0,
+  positionSizeUsd: number = 0,
+): number {
+  const annualizedCostPct = (roundTripCostPct / holdDays) * 365;
+  let bridgeCostAnnualPct = 0;
+  if (bridgeCostUsd > 0 && positionSizeUsd > 0) {
+    const bridgeRoundTripPct = (bridgeCostUsd * 2 / positionSizeUsd) * 100;
+    bridgeCostAnnualPct = (bridgeRoundTripPct / holdDays) * 365;
+  }
+  return grossAnnualPct - annualizedCostPct - bridgeCostAnnualPct;
+}
+
+// ── Funding Settlement Timing ──
+
+/** Settlement schedules per exchange (UTC hours when settlement occurs) */
+const SETTLEMENT_SCHEDULES: Record<string, number[]> = {
+  hyperliquid: Array.from({ length: 24 }, (_, i) => i), // every hour
+  pacifica: [0, 8, 16],   // every 8 hours
+  lighter: [0, 8, 16],    // every 8 hours
+};
+
+/**
+ * Get the next settlement time for an exchange.
+ * @returns Date of next settlement
+ */
+export function getNextSettlement(exchange: string, now: Date = new Date()): Date {
+  const schedule = SETTLEMENT_SCHEDULES[exchange.toLowerCase()];
+  if (!schedule || schedule.length === 0) {
+    // Default: every 8 hours
+    return getNextSettlement("pacifica", now);
+  }
+
+  const currentHour = now.getUTCHours();
+  const currentMinutes = now.getUTCMinutes();
+  const currentSeconds = now.getUTCSeconds();
+
+  // Find the next settlement hour strictly in the future
+  // A settlement at the current hour is "next" only if we haven't reached it yet (min=0, sec=0)
+  for (const hour of schedule) {
+    if (hour > currentHour || (hour === currentHour && currentMinutes === 0 && currentSeconds === 0)) {
+      // This settlement is still in the future (or exactly now)
+      // But skip if hour === currentHour and we're past minute 0
+      if (hour === currentHour && (currentMinutes > 0 || currentSeconds > 0)) continue;
+      const next = new Date(now);
+      next.setUTCHours(hour, 0, 0, 0);
+      return next;
+    }
+  }
+
+  // Wrap to next day's first settlement
+  const next = new Date(now);
+  next.setUTCDate(next.getUTCDate() + 1);
+  next.setUTCHours(schedule[0], 0, 0, 0);
+  return next;
+}
+
+/**
+ * Check if we are within N minutes before a settlement event on either exchange.
+ * If so, we should avoid entering positions (rates may change).
+ */
+export function isNearSettlement(
+  longExchange: string,
+  shortExchange: string,
+  bufferMinutes: number = 5,
+  now: Date = new Date(),
+): { blocked: boolean; exchange?: string; minutesUntil?: number } {
+  for (const exch of [longExchange, shortExchange]) {
+    const nextSettle = getNextSettlement(exch, now);
+    const minutesUntil = (nextSettle.getTime() - now.getTime()) / (1000 * 60);
+    if (minutesUntil <= bufferMinutes && minutesUntil >= 0) {
+      return { blocked: true, exchange: exch, minutesUntil };
+    }
+  }
+  return { blocked: false };
+}
+
+/**
+ * Detect if the funding spread has reversed direction for an open position.
+ * A reversal means the long exchange now has a HIGHER hourly rate than the short exchange,
+ * meaning we're now paying on both sides instead of collecting.
+ */
+export function isSpreadReversed(
+  longExchange: string,
+  shortExchange: string,
+  snapshot: FundingSnapshot,
+): boolean {
+  const rateFor = (e: string) =>
+    e === "pacifica" ? snapshot.pacRate : e === "hyperliquid" ? snapshot.hlRate : snapshot.ltRate;
+  const longHourly = toHourlyRate(rateFor(longExchange), longExchange);
+  const shortHourly = toHourlyRate(rateFor(shortExchange), shortExchange);
+  // Reversed if the long side rate exceeds the short side rate
+  return longHourly > shortHourly;
+}
+
 const LIGHTER_URL = "https://mainnet.zklighter.elliot.ai";
 
 async function fetchFundingSpreads(): Promise<FundingSnapshot[]> {
@@ -156,12 +294,19 @@ export function registerArbAutoCommands(
     .option("--max-positions <n>", "Max simultaneous arb positions", "5")
     .option("--symbols <list>", "Comma-separated symbols to monitor (default: all)")
     .option("--interval <seconds>", "Check interval", "60")
+    .option("--hold-days <days>", "Expected hold period for cost amortization", "7")
+    .option("--bridge-cost <usd>", "One-way bridge cost in USD", "0.5")
+    .option("--no-reversal-exit", "Disable emergency exit on spread reversal")
+    .option("--settle-aware", "Avoid entries near funding settlement (default: true)")
+    .option("--no-settle-aware", "Disable settlement timing awareness")
     .option("--dry-run", "Simulate without executing trades")
     .option("--background", "Run in background (tmux)")
     .action(async (opts: {
       minSpread: string; closeSpread: string; size: string;
-      maxPositions: string; symbols?: string; interval: string; dryRun?: boolean;
-      background?: boolean;
+      maxPositions: string; symbols?: string; interval: string;
+      holdDays: string; bridgeCost: string;
+      reversalExit?: boolean; settleAware?: boolean;
+      dryRun?: boolean; background?: boolean;
     }) => {
       if (opts.background) {
         const { startJob } = await import("../jobs.js");
@@ -171,8 +316,12 @@ export function registerArbAutoCommands(
           `--size`, opts.size,
           `--max-positions`, opts.maxPositions,
           `--interval`, opts.interval,
+          `--hold-days`, opts.holdDays,
+          `--bridge-cost`, opts.bridgeCost,
           ...(opts.symbols ? [`--symbols`, opts.symbols] : []),
           ...(opts.dryRun ? [`--dry-run`] : []),
+          ...(opts.reversalExit === false ? [`--no-reversal-exit`] : []),
+          ...(opts.settleAware === false ? [`--no-settle-aware`] : []),
           ...(opts.minSpread ? [`--auto-execute`] : []),
         ];
         const job = startJob({
@@ -195,6 +344,10 @@ export function registerArbAutoCommands(
       const sizeUsd = parseFloat(opts.size);
       const maxPositions = parseInt(opts.maxPositions);
       const intervalMs = parseInt(opts.interval) * 1000;
+      const holdDays = parseFloat(opts.holdDays);
+      const bridgeCostUsd = parseFloat(opts.bridgeCost);
+      const reversalExitEnabled = opts.reversalExit !== false;
+      const settleAwareEnabled = opts.settleAware !== false;
       const filterSymbols = opts.symbols?.split(",").map(s => s.trim().toUpperCase());
       const dryRun = !!opts.dryRun || process.argv.includes("--dry-run");
 
@@ -203,10 +356,14 @@ export function registerArbAutoCommands(
       if (!isJson()) {
         console.log(chalk.cyan.bold("\n  Funding Rate Arb Bot\n"));
         console.log(`  Mode:          ${dryRun ? chalk.yellow("DRY RUN") : chalk.green("LIVE")}`);
-        console.log(`  Enter spread:  >= ${minSpread}% annual`);
+        console.log(`  Enter spread:  >= ${minSpread}% annual (net, after fees)`);
         console.log(`  Close spread:  <= ${closeSpread}% annual`);
         console.log(`  Size per leg:  $${sizeUsd}`);
         console.log(`  Max positions: ${maxPositions}`);
+        console.log(`  Hold period:   ${holdDays} days (cost amortization)`);
+        console.log(`  Bridge cost:   $${bridgeCostUsd} per transfer`);
+        console.log(`  Reversal exit: ${reversalExitEnabled ? chalk.green("ON") : chalk.yellow("OFF")}`);
+        console.log(`  Settle aware:  ${settleAwareEnabled ? chalk.green("ON") : chalk.yellow("OFF")}`);
         console.log(`  Symbols:       ${filterSymbols?.join(", ") || "all"}`);
         console.log(`  Interval:      ${opts.interval}s`);
         console.log(chalk.gray("\n  Monitoring... (Ctrl+C to stop)\n"));
@@ -228,8 +385,23 @@ export function registerArbAutoCommands(
             if (!current) continue;
 
             const currentSpread = Math.abs(current.spread);
+            let shouldClose = false;
+            let closeReason = "";
+
+            // Check spread-based close
             if (currentSpread <= closeSpread) {
-              console.log(chalk.yellow(`  ${now} CLOSE ${pos.symbol} — spread ${currentSpread.toFixed(1)}% < ${closeSpread}%`));
+              shouldClose = true;
+              closeReason = `spread ${currentSpread.toFixed(1)}% <= ${closeSpread}%`;
+            }
+
+            // Check reversal-based close
+            if (!shouldClose && reversalExitEnabled && isSpreadReversed(pos.longExchange, pos.shortExchange, current)) {
+              shouldClose = true;
+              closeReason = "REVERSAL DETECTED — long exchange now has higher rate than short";
+            }
+
+            if (shouldClose) {
+              console.log(chalk.yellow(`  ${now} CLOSE ${pos.symbol} — ${closeReason}`));
 
               if (!dryRun) {
                 try {
@@ -242,7 +414,7 @@ export function registerArbAutoCommands(
                     type: "arb_close", exchange: `${pos.longExchange}+${pos.shortExchange}`,
                     symbol: pos.symbol, side: "close", size: pos.size,
                     status: "success", dryRun: false,
-                    meta: { longExchange: pos.longExchange, shortExchange: pos.shortExchange, currentSpread: currentSpread },
+                    meta: { longExchange: pos.longExchange, shortExchange: pos.shortExchange, currentSpread, reason: closeReason },
                   });
                   console.log(chalk.green(`  ${now} CLOSED ${pos.symbol} — both legs`));
                 } catch (err) {
@@ -251,7 +423,7 @@ export function registerArbAutoCommands(
                     symbol: pos.symbol, side: "close", size: pos.size,
                     status: "failed", dryRun: false,
                     error: err instanceof Error ? err.message : String(err),
-                    meta: { longExchange: pos.longExchange, shortExchange: pos.shortExchange },
+                    meta: { longExchange: pos.longExchange, shortExchange: pos.shortExchange, reason: closeReason },
                   });
                   console.error(chalk.red(`  ${now} CLOSE FAILED ${pos.symbol}: ${err instanceof Error ? err.message : err}`));
                 }
@@ -261,22 +433,53 @@ export function registerArbAutoCommands(
             }
           }
 
+          // Log next settlement times
+          if (!isJson() && settleAwareEnabled) {
+            const nowDate = new Date();
+            const exAbbr = (e: string) => e === "pacifica" ? "PAC" : e === "hyperliquid" ? "HL" : "LT";
+            const nextHL = getNextSettlement("hyperliquid", nowDate);
+            const nextPAC = getNextSettlement("pacifica", nowDate);
+            const nextLT = getNextSettlement("lighter", nowDate);
+            const fmtMin = (d: Date) => Math.max(0, Math.round((d.getTime() - nowDate.getTime()) / 60000));
+            console.log(chalk.gray(
+              `  ${now} Next settlements: HL ${fmtMin(nextHL)}m | PAC ${fmtMin(nextPAC)}m | LT ${fmtMin(nextLT)}m`
+            ));
+          }
+
           // Check for entry conditions
           if (openPositions.length < maxPositions) {
             for (const snap of filtered) {
               if (openPositions.some(p => p.symbol === snap.symbol)) continue;
               if (openPositions.length >= maxPositions) break;
 
-              const absSpread = Math.abs(snap.spread);
-              if (absSpread < minSpread) continue;
+              const grossSpread = Math.abs(snap.spread);
 
               // Determine direction using all 3 exchanges: short the high-funding, long the low-funding
               const longExchange = snap.longExch;
               const shortExchange = snap.shortExch;
+
+              // Compute net spread after fees and bridge costs
+              const roundTripCost = computeRoundTripCostPct(longExchange, shortExchange);
+              const netSpread = computeNetSpread(grossSpread, holdDays, roundTripCost, bridgeCostUsd, sizeUsd);
+
+              // --min-spread now compares against NET spread
+              if (netSpread < minSpread) continue;
+
+              // Settlement timing check
+              if (settleAwareEnabled) {
+                const settlCheck = isNearSettlement(longExchange, shortExchange);
+                if (settlCheck.blocked) {
+                  console.log(chalk.gray(
+                    `  ${now} SKIP ${snap.symbol}: ${settlCheck.minutesUntil?.toFixed(1)}m before ${settlCheck.exchange} settlement`
+                  ));
+                  continue;
+                }
+              }
+
               const rateForExch = (e: string) => e === "pacifica" ? snap.pacRate : e === "hyperliquid" ? snap.hlRate : snap.ltRate;
 
               console.log(chalk.green(
-                `  ${now} ENTER ${snap.symbol} — spread ${absSpread.toFixed(1)}%` +
+                `  ${now} ENTER ${snap.symbol} — gross ${grossSpread.toFixed(1)}% net ${netSpread.toFixed(1)}%` +
                 ` | Long ${longExchange} (${(rateForExch(longExchange) * 100).toFixed(4)}%)` +
                 ` | Short ${shortExchange} (${(rateForExch(shortExchange) * 100).toFixed(4)}%)`
               ));
@@ -302,7 +505,7 @@ export function registerArbAutoCommands(
                     type: "arb_entry", exchange: `${longExchange}+${shortExchange}`,
                     symbol: snap.symbol, side: "entry", size: sizeInAsset,
                     status: "success", dryRun: false,
-                    meta: { longExchange, shortExchange, spread: absSpread, markPrice: snap.markPrice },
+                    meta: { longExchange, shortExchange, grossSpread, netSpread, roundTripCost, markPrice: snap.markPrice },
                   });
                   console.log(chalk.green(`  ${now} FILLED ${snap.symbol} — both legs @ ${sizeInAsset} units ($${sizeUsd} / $${snap.markPrice.toFixed(2)})`));
                 } catch (err) {
@@ -311,7 +514,7 @@ export function registerArbAutoCommands(
                     symbol: snap.symbol, side: "entry", size: sizeInAsset,
                     status: "failed", dryRun: false,
                     error: err instanceof Error ? err.message : String(err),
-                    meta: { longExchange, shortExchange, spread: absSpread },
+                    meta: { longExchange, shortExchange, grossSpread, netSpread },
                   });
                   console.error(chalk.red(`  ${now} ENTRY FAILED ${snap.symbol}: ${err instanceof Error ? err.message : err}`));
                   continue;
@@ -323,7 +526,7 @@ export function registerArbAutoCommands(
                 longExchange,
                 shortExchange,
                 size: sizeInAsset,
-                entrySpread: absSpread,
+                entrySpread: grossSpread,
                 entryTime: new Date().toISOString(),
                 entryMarkPrice: snap.markPrice,
                 accumulatedFundingUsd: 0,
@@ -376,37 +579,64 @@ export function registerArbAutoCommands(
     .command("scan")
     .description("Scan current funding rate spreads")
     .option("--min <pct>", "Min annual spread to show", "10")
-    .action(async (opts: { min: string }) => {
+    .option("--hold-days <days>", "Expected hold period for cost calc", "7")
+    .option("--bridge-cost <usd>", "One-way bridge cost in USD", "0.5")
+    .option("--size <usd>", "Position size per leg ($) for cost calc", "100")
+    .action(async (opts: { min: string; holdDays: string; bridgeCost: string; size: string }) => {
       const minSpread = parseFloat(opts.min);
+      const holdDays = parseFloat(opts.holdDays);
+      const bridgeCostUsd = parseFloat(opts.bridgeCost);
+      const sizeUsd = parseFloat(opts.size);
       if (!isJson()) console.log(chalk.cyan("\n  Scanning funding rate spreads...\n"));
 
       const spreads = await fetchFundingSpreads();
       const filtered = spreads.filter(s => Math.abs(s.spread) >= minSpread);
 
-      if (isJson()) return printJson(jsonOk(filtered));
+      if (isJson()) {
+        const enriched = filtered.map(s => {
+          const grossSpread = Math.abs(s.spread);
+          const rtCost = computeRoundTripCostPct(s.longExch, s.shortExch);
+          const net = computeNetSpread(grossSpread, holdDays, rtCost, bridgeCostUsd, sizeUsd);
+          return { ...s, grossSpread, netSpread: net, estFeesPct: rtCost };
+        });
+        return printJson(jsonOk(enriched));
+      }
 
       if (filtered.length === 0) {
         console.log(chalk.gray(`  No spreads above ${minSpread}%\n`));
         return;
       }
 
+      // Header
+      console.log(
+        chalk.gray(`  ${"SYMBOL".padEnd(8)} ${"GROSS".padEnd(8)} ${"NET".padEnd(8)} ${"FEES".padEnd(7)} ${"DIR".padEnd(7)} RATES`)
+      );
+
       for (const s of filtered) {
         const exAbbr = (e: string) => e === "pacifica" ? "PAC" : e === "hyperliquid" ? "HL" : "LT";
         const direction = `${exAbbr(s.shortExch)}>${exAbbr(s.longExch)}`;
-        const color = Math.abs(s.spread) >= 30 ? chalk.green : chalk.yellow;
+        const grossSpread = Math.abs(s.spread);
+        const rtCost = computeRoundTripCostPct(s.longExch, s.shortExch);
+        const netSpread = computeNetSpread(grossSpread, holdDays, rtCost, bridgeCostUsd, sizeUsd);
+        const grossColor = grossSpread >= 30 ? chalk.green : chalk.yellow;
+        const netColor = netSpread >= 20 ? chalk.green : netSpread >= 0 ? chalk.yellow : chalk.red;
         const rates: string[] = [];
-        if (s.pacRate) rates.push(`PAC: ${(s.pacRate * 100).toFixed(4)}%`);
-        if (s.hlRate) rates.push(`HL: ${(s.hlRate * 100).toFixed(4)}%`);
-        if (s.ltRate) rates.push(`LT: ${(s.ltRate * 100).toFixed(4)}%`);
+        if (s.pacRate) rates.push(`PAC:${(s.pacRate * 100).toFixed(4)}%`);
+        if (s.hlRate) rates.push(`HL:${(s.hlRate * 100).toFixed(4)}%`);
+        if (s.ltRate) rates.push(`LT:${(s.ltRate * 100).toFixed(4)}%`);
         console.log(
           `  ${chalk.white.bold(s.symbol.padEnd(8))} ` +
-          `${color(`${Math.abs(s.spread).toFixed(1)}%`.padEnd(8))} ` +
+          `${grossColor(`${grossSpread.toFixed(1)}%`.padEnd(8))} ` +
+          `${netColor(`${netSpread.toFixed(1)}%`.padEnd(8))} ` +
+          `${chalk.gray(`${rtCost.toFixed(2)}%`.padEnd(7))} ` +
           `${direction.padEnd(7)} ` +
-          rates.join("  ")
+          rates.join(" ")
         );
       }
 
-      console.log(chalk.gray(`\n  ${filtered.length} opportunities above ${minSpread}% annual spread`));
+      console.log(chalk.gray(`\n  ${filtered.length} opportunities above ${minSpread}% gross annual spread`));
+      console.log(chalk.gray(`  Net spread assumes ${holdDays}d hold, $${bridgeCostUsd} bridge cost, $${sizeUsd} size`));
+      console.log(chalk.gray(`  * Spreads are estimates based on current rates — actual may vary`));
       console.log(chalk.gray(`  Use 'perp arb auto --min-spread ${minSpread}' to auto-trade\n`));
     });
 
@@ -496,17 +726,22 @@ export function registerArbAutoCommands(
         }
 
         if (spread) {
-          const annSpread = Math.abs(spread.spread);
-          const spreadColor = annSpread >= 20 ? chalk.green : annSpread >= 10 ? chalk.yellow : chalk.gray;
+          const grossSpread = Math.abs(spread.spread);
+          const rtCost = computeRoundTripCostPct(spread.longExch, spread.shortExch);
+          const netSpread = computeNetSpread(grossSpread, 7, rtCost, 0.5, 100);
+          const grossColor = grossSpread >= 20 ? chalk.green : grossSpread >= 10 ? chalk.yellow : chalk.gray;
+          const netColor = netSpread >= 15 ? chalk.green : netSpread >= 0 ? chalk.yellow : chalk.red;
           // Estimate hourly funding income for this pair
           const longPos = positions.find(p => p.side === "long");
           const shortPos = positions.find(p => p.side === "short");
           if (longPos && shortPos) {
             const avgNotional = (longPos.size * longPos.mark + shortPos.size * shortPos.mark) / 2;
-            const hourlyIncome = (annSpread / 100) / (24 * 365) * avgNotional;
+            const hourlyIncome = (grossSpread / 100) / (24 * 365) * avgNotional;
             const dailyIncome = hourlyIncome * 24;
             console.log(chalk.cyan(
-              `    Spread: ${spreadColor(`${annSpread.toFixed(1)}%`)} annual | ` +
+              `    Gross: ${grossColor(`${grossSpread.toFixed(1)}%`)} | ` +
+              `Net: ${netColor(`${netSpread.toFixed(1)}%`)} | ` +
+              `Fees: ${chalk.gray(`${rtCost.toFixed(2)}%`)} | ` +
               `Est. income: $${hourlyIncome.toFixed(4)}/hr, $${dailyIncome.toFixed(3)}/day`
             ));
           }
@@ -525,7 +760,8 @@ export function registerArbAutoCommands(
       console.log(`    Unrealized PnL:  ${upnlColor(`$${totalUpnl.toFixed(4)}`)}`);
       console.log(`    Est. fees (in+out): ${chalk.red(`-$${totalFees.toFixed(4)}`)}`);
       console.log(`    Net (if closed now): ${netColor(`$${netPnl.toFixed(4)}`)}`);
-      console.log(chalk.gray(`    (Fees assume ${(TAKER_FEE * 100).toFixed(3)}% taker. Actual may vary.)\n`));
+      console.log(chalk.gray(`    (Fees assume ${(TAKER_FEE * 100).toFixed(3)}% taker. Actual may vary.)`));
+      console.log(chalk.gray(`    * Net spreads are predicted estimates — actual funding may differ.\n`));
     });
 
   // ── arb monitor ── (live monitoring with liquidity)
@@ -537,16 +773,23 @@ export function registerArbAutoCommands(
     .option("--interval <sec>", "Refresh interval in seconds", "60")
     .option("--top <n>", "Show top N opportunities", "15")
     .option("--check-liquidity", "Check orderbook depth (slower)")
-    .action(async (opts: { min: string; interval: string; top: string; checkLiquidity?: boolean }) => {
+    .option("--hold-days <days>", "Expected hold period for net spread calc", "7")
+    .option("--bridge-cost <usd>", "One-way bridge cost in USD", "0.5")
+    .option("--size <usd>", "Position size per leg ($) for cost calc", "100")
+    .action(async (opts: { min: string; interval: string; top: string; checkLiquidity?: boolean; holdDays: string; bridgeCost: string; size: string }) => {
       const minSpread = parseFloat(opts.min);
       const intervalSec = parseInt(opts.interval);
       const topN = parseInt(opts.top);
       const checkLiq = opts.checkLiquidity ?? false;
+      const holdDays = parseFloat(opts.holdDays);
+      const bridgeCostUsd = parseFloat(opts.bridgeCost);
+      const sizeUsd = parseFloat(opts.size);
       let cycle = 0;
 
       if (!isJson()) {
         console.log(chalk.cyan.bold("\n  Funding Arb Monitor"));
         console.log(chalk.gray(`  Min spread: ${minSpread}% | Refresh: ${intervalSec}s | Top: ${topN}`));
+        console.log(chalk.gray(`  Net spread: ${holdDays}d hold, $${bridgeCostUsd} bridge, $${sizeUsd} size`));
         if (checkLiq) console.log(chalk.gray(`  Liquidity check: ON`));
         console.log(chalk.gray(`  Press Ctrl+C to stop\n`));
       }
@@ -600,9 +843,13 @@ export function registerArbAutoCommands(
 
             for (const s of filtered) {
               const direction = `${exAbbr(s.shortExch)}>${exAbbr(s.longExch)}`;
-              const spreadColor = Math.abs(s.spread) >= 50 ? chalk.green.bold
-                : Math.abs(s.spread) >= 30 ? chalk.green
+              const grossSpread = Math.abs(s.spread);
+              const rtCost = computeRoundTripCostPct(s.longExch, s.shortExch);
+              const netSpread = computeNetSpread(grossSpread, holdDays, rtCost, bridgeCostUsd, sizeUsd);
+              const grossColor = grossSpread >= 50 ? chalk.green.bold
+                : grossSpread >= 30 ? chalk.green
                 : chalk.yellow;
+              const netColor = netSpread >= 20 ? chalk.green : netSpread >= 0 ? chalk.yellow : chalk.red;
 
               const rates: string[] = [];
               if (s.pacRate) rates.push(`PAC:${(s.pacRate * 100).toFixed(4)}%`);
@@ -617,12 +864,14 @@ export function registerArbAutoCommands(
 
               console.log(
                 `  ${chalk.white.bold(s.symbol.padEnd(8))} ` +
-                `${spreadColor(`${Math.abs(s.spread).toFixed(1)}%`.padEnd(8))} ` +
+                `${grossColor(`${grossSpread.toFixed(1)}%`.padEnd(8))} ` +
+                `${netColor(`net:${netSpread.toFixed(1)}%`.padEnd(12))} ` +
                 `${direction.padEnd(7)} ` +
                 rates.join(" ") +
                 liqInfo
               );
             }
+            console.log(chalk.gray(`  * Net spreads are predicted estimates (${holdDays}d hold, $${bridgeCostUsd} bridge)`));
             console.log();
           }
         } catch (err) {

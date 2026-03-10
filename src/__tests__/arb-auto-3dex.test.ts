@@ -1,4 +1,11 @@
 import { describe, it, expect } from "vitest";
+import {
+  computeNetSpread,
+  computeRoundTripCostPct,
+  getNextSettlement,
+  isNearSettlement,
+  isSpreadReversed,
+} from "../commands/arb-auto.js";
 
 /**
  * Tests for the enhanced 3-DEX arb direction and PnL tracking logic
@@ -293,5 +300,185 @@ describe("3-DEX entry/exit conditions", () => {
 
     const alreadyOpen = openPositions.some(p => p.symbol === "BTC");
     expect(alreadyOpen).toBe(true);
+  });
+});
+
+// ──────────────────────────────────────────────
+// Net spread calculation
+// ──────────────────────────────────────────────
+
+describe("computeNetSpread", () => {
+  it("correctly deducts annualized round-trip cost from gross spread", () => {
+    // gross=30%, hold=7d, roundTrip=0.14% → net = 30 - (0.14/7*365) = 30 - 7.3 = 22.7
+    const net = computeNetSpread(30, 7, 0.14);
+    expect(net).toBeCloseTo(22.7, 1);
+  });
+
+  it("returns gross spread when costs are zero", () => {
+    const net = computeNetSpread(50, 7, 0);
+    expect(net).toBe(50);
+  });
+
+  it("can produce negative net spread when costs exceed gross", () => {
+    // gross=5%, hold=1d, roundTrip=0.14% → net = 5 - (0.14*365) = 5 - 51.1 = -46.1
+    const net = computeNetSpread(5, 1, 0.14);
+    expect(net).toBeLessThan(0);
+  });
+
+  it("longer hold periods reduce annualized cost impact", () => {
+    const net7d = computeNetSpread(30, 7, 0.14);
+    const net30d = computeNetSpread(30, 30, 0.14);
+    expect(net30d).toBeGreaterThan(net7d);
+  });
+
+  it("includes bridge cost in net spread calculation", () => {
+    // Without bridge cost
+    const netNoBridge = computeNetSpread(30, 7, 0.14, 0, 100);
+    // With $0.50 bridge cost, $100 position
+    // bridgeRoundTripPct = (0.5 * 2 / 100) * 100 = 1%
+    // bridgeAnnualized = (1/7) * 365 = 52.14%
+    const netWithBridge = computeNetSpread(30, 7, 0.14, 0.5, 100);
+    expect(netWithBridge).toBeLessThan(netNoBridge);
+    // Difference should be the annualized bridge cost
+    const bridgeDiff = netNoBridge - netWithBridge;
+    expect(bridgeDiff).toBeCloseTo(52.14, 0);
+  });
+
+  it("bridge cost impact scales inversely with position size", () => {
+    const netSmall = computeNetSpread(30, 7, 0.14, 0.5, 50);   // $50 position
+    const netLarge = computeNetSpread(30, 7, 0.14, 0.5, 500);   // $500 position
+    // Larger positions dilute bridge cost
+    expect(netLarge).toBeGreaterThan(netSmall);
+  });
+});
+
+describe("computeRoundTripCostPct", () => {
+  it("computes round-trip cost for same-fee exchanges", () => {
+    // 2 × (0.035% + 0.035%) + 2 × 0.05% = 0.24%
+    const cost = computeRoundTripCostPct("hyperliquid", "pacifica", 0.05);
+    expect(cost).toBeCloseTo(0.24, 4);
+  });
+
+  it("uses default slippage of 0.05%", () => {
+    const cost = computeRoundTripCostPct("hyperliquid", "lighter");
+    // 2 × (0.035% + 0.035%) + 2 × 0.05% = 0.24%
+    expect(cost).toBeCloseTo(0.24, 4);
+  });
+
+  it("handles custom slippage", () => {
+    const cost = computeRoundTripCostPct("hyperliquid", "pacifica", 0.1);
+    // 2 × (0.035% + 0.035%) + 2 × 0.1% = 0.34%
+    expect(cost).toBeCloseTo(0.34, 4);
+  });
+});
+
+// ──────────────────────────────────────────────
+// Spread reversal detection
+// ──────────────────────────────────────────────
+
+describe("Spread reversal detection", () => {
+  it("detects reversal when long exchange rate exceeds short", () => {
+    const snap: FundingSnapshot = {
+      symbol: "BTC",
+      pacRate: 0.0001,    // PAC low (was short, now low)
+      hlRate: 0.0005,     // HL high (was long, now high)
+      ltRate: 0,
+      spread: 30,
+      longExch: "pacifica",
+      shortExch: "hyperliquid",
+      markPrice: 60000,
+    };
+    // Position: long HL, short PAC — but now HL hourly (0.0005) > PAC hourly (0.0001/8=0.0000125)
+    const reversed = isSpreadReversed("hyperliquid", "pacifica", snap);
+    expect(reversed).toBe(true);
+  });
+
+  it("does not flag reversal when spread is still favorable", () => {
+    const snap: FundingSnapshot = {
+      symbol: "BTC",
+      pacRate: 0.001,    // PAC high
+      hlRate: 0.00005,   // HL low
+      ltRate: 0,
+      spread: 65.7,
+      longExch: "hyperliquid",
+      shortExch: "pacifica",
+      markPrice: 60000,
+    };
+    // Position: long HL, short PAC — HL hourly (0.00005) < PAC hourly (0.001/8=0.000125) → no reversal
+    const reversed = isSpreadReversed("hyperliquid", "pacifica", snap);
+    expect(reversed).toBe(false);
+  });
+
+  it("handles lighter vs pacifica reversal", () => {
+    const snap: FundingSnapshot = {
+      symbol: "SOL",
+      pacRate: 0.0001,   // PAC hourly = 0.0000125
+      hlRate: 0,
+      ltRate: 0.0002,    // LT hourly = 0.000025
+      spread: 10,
+      longExch: "pacifica",
+      shortExch: "lighter",
+      markPrice: 150,
+    };
+    // Position: long LT, short PAC — LT hourly (0.000025) > PAC hourly (0.0000125) → reversed
+    const reversed = isSpreadReversed("lighter", "pacifica", snap);
+    expect(reversed).toBe(true);
+  });
+});
+
+// ──────────────────────────────────────────────
+// Settlement timing awareness
+// ──────────────────────────────────────────────
+
+describe("Settlement timing awareness", () => {
+  it("getNextSettlement returns next hour for HL", () => {
+    // At 14:30 UTC, next HL settlement is at 15:00 UTC
+    const now = new Date("2025-01-15T14:30:00Z");
+    const next = getNextSettlement("hyperliquid", now);
+    expect(next.getUTCHours()).toBe(15);
+    expect(next.getUTCMinutes()).toBe(0);
+  });
+
+  it("getNextSettlement returns next 8h boundary for PAC", () => {
+    // At 06:00 UTC, next PAC settlement is at 08:00 UTC
+    const now = new Date("2025-01-15T06:00:00Z");
+    const next = getNextSettlement("pacifica", now);
+    expect(next.getUTCHours()).toBe(8);
+  });
+
+  it("getNextSettlement wraps to next day when past last settlement", () => {
+    // At 17:00 UTC, next PAC settlement is at 00:00 next day
+    const now = new Date("2025-01-15T17:00:00Z");
+    const next = getNextSettlement("pacifica", now);
+    expect(next.getUTCHours()).toBe(0);
+    expect(next.getUTCDate()).toBe(16);
+  });
+
+  it("isNearSettlement blocks entry within 5 minutes of settlement", () => {
+    // 3 minutes before 08:00 UTC PAC settlement; HL next is also coming but at 06:00 → 6:03 away
+    // Use a time where HL is far from settlement but PAC is near
+    const now = new Date("2025-01-15T07:57:00Z");
+    // HL next settlement: 08:00 (3 min away) — but HL settles hourly so it's also near!
+    // To isolate PAC, use lighter+pacifica (both 8h) where one is near
+    const result = isNearSettlement("lighter", "pacifica", 5, now);
+    expect(result.blocked).toBe(true);
+    // Both lighter and pacifica settle at 08:00, lighter checked first
+    expect(result.exchange).toBe("lighter");
+    expect(result.minutesUntil).toBeLessThanOrEqual(5);
+  });
+
+  it("isNearSettlement allows entry far from settlement", () => {
+    // 30 minutes before 16:00 UTC PAC settlement
+    const now = new Date("2025-01-15T15:30:00Z");
+    const result = isNearSettlement("lighter", "pacifica", 5, now);
+    expect(result.blocked).toBe(false);
+  });
+
+  it("isNearSettlement checks both exchanges", () => {
+    // 2 minutes before hourly HL settlement
+    const now = new Date("2025-01-15T14:58:00Z");
+    const result = isNearSettlement("hyperliquid", "pacifica", 5, now);
+    expect(result.blocked).toBe(true);
+    expect(result.exchange).toBe("hyperliquid");
   });
 });
