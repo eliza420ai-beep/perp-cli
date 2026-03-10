@@ -113,10 +113,11 @@ describe("Flow 1: 스프레드 스캔 → 기회 평가 → 진입 판단", () =
     const pacHourly = toHourlyRate(pacRawRate, "pacifica");
     const hlHourly = toHourlyRate(hlRawRate, "hyperliquid");
     const ltHourly = toHourlyRate(ltRawRate, "lighter");
-    // All exchanges are hourly, so rates remain unchanged
+    // PAC and HL are hourly, so rates remain unchanged
     expect(pacHourly).toBe(pacRawRate);
     expect(hlHourly).toBe(hlRawRate);
-    expect(ltHourly).toBe(ltRawRate);
+    // Lighter API returns 8h rate, so hourly = raw / 8
+    expect(ltHourly).toBeCloseTo(ltRawRate / 8);
   });
 
   it("computeAnnualSpread finds best pair (PAC vs HL has largest spread)", () => {
@@ -1047,14 +1048,14 @@ describe("Cross-cutting: edge cases and combined scenarios", () => {
       symbol: "SOL",
       pacRate: 0.00001,
       hlRate: 0.00002,
-      ltRate: 0.00005, // LT rate surged past PAC
+      ltRate: 0.0004, // LT 8h rate surged: hourly = 0.0004/8 = 0.00005 > PAC 0.00001
       spread: 35,
       longExch: "lighter",
       shortExch: "pacifica",
       markPrice: 150,
       pacMarkPrice: 0, hlMarkPrice: 0, ltMarkPrice: 0,
     };
-    // Long LT at 0.00005, short PAC at 0.00001 → longHourly > shortHourly → reversed
+    // Long LT hourly = 0.0004/8 = 0.00005, short PAC hourly = 0.00001 → reversed
     expect(isSpreadReversed("lighter", "pacifica", snapshot)).toBe(true);
   });
 

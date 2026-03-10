@@ -426,7 +426,7 @@ describe("Spread reversal detection", () => {
       symbol: "SOL",
       pacRate: 0.0001,   // PAC hourly = 0.0001
       hlRate: 0,
-      ltRate: 0.0002,    // LT hourly = 0.0002
+      ltRate: 0.0016,    // LT 8h rate, hourly = 0.0016/8 = 0.0002
       spread: 10,
       longExch: "pacifica",
       shortExch: "lighter",

@@ -13,6 +13,7 @@ vi.stubGlobal("fetch", mockFetch);
 
 // Import after mocking fetch
 const { fetchAllFundingRates, fetchSymbolFundingRates, TOP_SYMBOLS } = await import("../funding-rates.js");
+const { invalidateCache } = await import("../cache.js");
 
 // ── Helpers to build mock API responses ──
 
@@ -42,7 +43,7 @@ function setupMockFetch(opts: {
   hl?: { assets: { name: string }[]; ctxs: { funding: number; markPx: number }[] };
   lt?: {
     details: { market_id: number; symbol: string; last_trade_price: number }[];
-    funding: { market_id: number; symbol?: string; rate: number }[];
+    funding: { market_id: number; symbol?: string; rate: number; exchange?: string }[];
   };
   pacError?: boolean;
   hlError?: boolean;
@@ -80,7 +81,7 @@ function setupMockFetch(opts: {
       if (opts.ltError) throw new Error("Lighter API error");
       const lt = opts.lt ?? { details: [], funding: [] };
       return {
-        json: async () => ({ funding_rates: lt.funding }),
+        json: async () => ({ funding_rates: lt.funding.map(fr => ({ exchange: "lighter", ...fr })) }),
       };
     }
 
@@ -90,6 +91,7 @@ function setupMockFetch(opts: {
 
 beforeEach(() => {
   mockFetch.mockReset();
+  invalidateCache();
 });
 
 // ──────────────────────────────────────────────
@@ -361,36 +363,36 @@ describe("fetchSymbolFundingRates", () => {
 describe("3-DEX direction logic", () => {
   it("picks correct long/short when lighter has best rate", async () => {
     setupMockFetch({
-      pac: [{ symbol: "BTC", funding: 0.00006, mark: 60000 }],  // mid (0.00006/hr)
+      pac: [{ symbol: "BTC", funding: 0.00006, mark: 60000 }],  // hourly = 0.00006
       hl: {
         assets: [{ name: "BTC" }],
-        ctxs: [{ funding: 0.0002, markPx: 60100 }],  // highest (0.0002/hr)
+        ctxs: [{ funding: 0.0002, markPx: 60100 }],  // hourly = 0.0002 (highest)
       },
       lt: {
         details: [{ market_id: 1, symbol: "BTC", last_trade_price: 59900 }],
-        funding: [{ market_id: 1, rate: 0.00001 }],  // lowest (0.00001/hr)
+        funding: [{ market_id: 1, rate: 0.00001 }],  // 8h rate, hourly = 0.00001/8 (lowest)
       },
     });
 
     const snapshot = await fetchAllFundingRates();
     const btc = snapshot.symbols.find(s => s.symbol === "BTC");
     expect(btc).toBeTruthy();
-    // Lighter has lowest hourly rate -> long on lighter
-    // HL has highest hourly rate -> short on HL
+    // Lighter has lowest hourly rate (0.00001/8) -> long on lighter
+    // HL has highest hourly rate (0.0002) -> short on HL
     expect(btc!.longExchange).toBe("lighter");
     expect(btc!.shortExchange).toBe("hyperliquid");
   });
 
   it("picks pacifica as short when it has highest rate", async () => {
     setupMockFetch({
-      pac: [{ symbol: "ETH", funding: 0.0005, mark: 3000 }],  // highest (0.0005/hr)
+      pac: [{ symbol: "ETH", funding: 0.0005, mark: 3000 }],  // hourly = 0.0005 (highest)
       hl: {
         assets: [{ name: "ETH" }],
-        ctxs: [{ funding: 0.0001, markPx: 3010 }],  // mid (0.0001/hr)
+        ctxs: [{ funding: 0.0001, markPx: 3010 }],  // hourly = 0.0001 (mid)
       },
       lt: {
         details: [{ market_id: 2, symbol: "ETH", last_trade_price: 2990 }],
-        funding: [{ market_id: 2, rate: 0.000025 }],  // lowest (0.000025/hr)
+        funding: [{ market_id: 2, rate: 0.000025 }],  // 8h rate, hourly = 0.000025/8 (lowest)
       },
     });
 

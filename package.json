@@ -14,7 +14,7 @@
     "build": "tsc",
     "dev": "tsc --watch",
     "test": "vitest run --exclude '**/integration/**'",
-    "test:integration": "vitest run --include '**/integration/**'",
+    "test:integration": "vitest run '**/integration/**'",
     "test:all": "vitest run",
     "prepublishOnly": "pnpm run build"
   },

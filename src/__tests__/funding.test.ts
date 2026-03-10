@@ -20,8 +20,8 @@ describe("getFundingHours", () => {
     expect(getFundingHours("pacifica")).toBe(1);
   });
 
-  it("returns 1 for lighter", () => {
-    expect(getFundingHours("lighter")).toBe(1);
+  it("returns 8 for lighter", () => {
+    expect(getFundingHours("lighter")).toBe(8);
   });
 
   it("defaults to 1 for unknown exchanges (main exchanges are hourly)", () => {
@@ -32,7 +32,7 @@ describe("getFundingHours", () => {
   it("is case-insensitive", () => {
     expect(getFundingHours("Hyperliquid")).toBe(1);
     expect(getFundingHours("PACIFICA")).toBe(1);
-    expect(getFundingHours("Lighter")).toBe(1);
+    expect(getFundingHours("Lighter")).toBe(8);
   });
 });
 
@@ -51,9 +51,9 @@ describe("toHourlyRate", () => {
     expect(hourly).toBeCloseTo(0.0001);
   });
 
-  it("divides by 1 for lighter (rate is already per-hour)", () => {
+  it("divides by 8 for lighter (API returns 8h rate)", () => {
     const hourly = toHourlyRate(0.0002, "lighter");
-    expect(hourly).toBeCloseTo(0.0002);
+    expect(hourly).toBeCloseTo(0.0002 / 8);
   });
 
   it("divides by 1 for unknown exchanges (default)", () => {
@@ -131,11 +131,12 @@ describe("computeAnnualSpread", () => {
     expect(spread1).toBeGreaterThan(0);
   });
 
-  it("computes spread with same exchange type (both hourly)", () => {
-    // pacifica 0.000125/h and lighter 0.0000625/h
-    // diff: 0.0000625/h * 8760 * 100 = 54.75%
+  it("computes spread between pacifica (1h) and lighter (8h)", () => {
+    // pacifica raw 0.000125 → hourly = 0.000125
+    // lighter raw 0.0000625 → hourly = 0.0000625/8 = 0.0000078125
+    // diff: |0.000125 - 0.0000078125| = 0.0001171875/h * 8760 * 100 = 102.66%
     const spread = computeAnnualSpread(0.000125, "pacifica", 0.0000625, "lighter");
-    expect(spread).toBeCloseTo(54.75);
+    expect(spread).toBeCloseTo(102.66, 1);
   });
 
   it("handles zero rates", () => {
