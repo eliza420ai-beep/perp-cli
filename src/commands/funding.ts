@@ -8,8 +8,9 @@ import {
   type FundingRateSnapshot,
   type SymbolFundingComparison,
 } from "../funding-rates.js";
-import { estimateHourlyFunding } from "../funding.js";
+import { estimateHourlyFunding, annualizeHourlyRate } from "../funding.js";
 import {
+  saveFundingSnapshot,
   getHistoricalRates,
   getCompoundedAnnualReturn,
   getExchangeCompoundingHours,
@@ -47,6 +48,12 @@ export function registerFundingCommands(
         symbols: filterSymbols,
         minSpread,
       });
+
+      // Persist snapshot for historical tracking (moved from fetchAllFundingRates to avoid side effect)
+      try {
+        const allRates = snapshot.symbols.flatMap(s => s.rates);
+        if (allRates.length > 0) saveFundingSnapshot(allRates);
+      } catch { /* non-critical */ }
 
       if (isJson()) return printJson(jsonOk(snapshot));
 
@@ -176,7 +183,7 @@ export function registerFundingCommands(
           const date = new Date(r.ts);
           const timeStr = date.toLocaleString();
           const hourlyPct = (r.hourlyRate * 100).toFixed(6);
-          const annualPct = (r.hourlyRate * 24 * 365 * 100).toFixed(2);
+          const annualPct = annualizeHourlyRate(r.hourlyRate).toFixed(2);
           const color = r.rate > 0 ? chalk.red : r.rate < 0 ? chalk.green : chalk.white;
           return [
             chalk.gray(timeStr),
@@ -281,7 +288,7 @@ export function registerFundingCommands(
 
 function formatAvgRate(rate: number | null | undefined): string {
   if (rate == null) return chalk.gray("-");
-  const annualPct = rate * 24 * 365 * 100;
+  const annualPct = annualizeHourlyRate(rate);
   const color = annualPct > 0 ? chalk.red : annualPct < 0 ? chalk.green : chalk.white;
   return color(`${annualPct.toFixed(1)}%`);
 }
@@ -294,7 +301,7 @@ function getAvgSpread(s: SymbolFundingComparison, windowKey: "avg8h" | "avg24h" 
   if (avgs.length < 2) return chalk.gray("-");
   const maxH = Math.max(...avgs);
   const minH = Math.min(...avgs);
-  const spreadPct = (maxH - minH) * 24 * 365 * 100;
+  const spreadPct = annualizeHourlyRate(maxH - minH);
   return `${spreadPct.toFixed(1)}%`;
 }
 
@@ -380,9 +387,9 @@ function printDetailedComparison(comparison: SymbolFundingComparison): void {
     console.log(chalk.cyan("\n  Historical Averages (annualized):"));
     for (const r of comparison.rates) {
       if (!r.historicalAvg) continue;
-      const avg8h = r.historicalAvg.avg8h != null ? `${(r.historicalAvg.avg8h * 24 * 365 * 100).toFixed(1)}%` : "-";
-      const avg24h = r.historicalAvg.avg24h != null ? `${(r.historicalAvg.avg24h * 24 * 365 * 100).toFixed(1)}%` : "-";
-      const avg7d = r.historicalAvg.avg7d != null ? `${(r.historicalAvg.avg7d * 24 * 365 * 100).toFixed(1)}%` : "-";
+      const avg8h = r.historicalAvg.avg8h != null ? `${annualizeHourlyRate(r.historicalAvg.avg8h).toFixed(1)}%` : "-";
+      const avg24h = r.historicalAvg.avg24h != null ? `${annualizeHourlyRate(r.historicalAvg.avg24h).toFixed(1)}%` : "-";
+      const avg7d = r.historicalAvg.avg7d != null ? `${annualizeHourlyRate(r.historicalAvg.avg7d).toFixed(1)}%` : "-";
       console.log(`  ${chalk.white.bold(exAbbr(r.exchange).padEnd(4))} ` +
         `8h: ${avg8h.padEnd(10)} 24h: ${avg24h.padEnd(10)} 7d: ${avg7d}`);
     }
