@@ -95,6 +95,14 @@ export function getUI(): string {
   .rate-negative { color:var(--red); }
   .rate-neutral { color:var(--muted); }
 
+  /* Sortable headers */
+  thead th.sortable { cursor:pointer; user-select:none; transition:color 0.15s; }
+  thead th.sortable:hover { color:var(--cyan); }
+
+  /* Spread bar */
+  .spread-bar { margin-top:3px; height:3px; width:100%; background:var(--border); border-radius:2px; overflow:hidden; }
+  .spread-bar-fill { height:100%; border-radius:2px; transition:width 0.3s; }
+
   /* Event log */
   .event-log { max-height:200px; overflow-y:auto; background:var(--card); border:1px solid var(--border); border-radius:8px; padding:10px 14px; font-size:12px; line-height:1.6; }
   .event-log .event { border-bottom:1px solid var(--border); padding:3px 0; }
@@ -188,6 +196,8 @@ const MAX_EVENTS = 100;
 const events = [];
 // Dex filter: which dex prefixes to show (null = show all)
 let activeDexFilters = new Set(); // empty = show all
+// Arb sort state
+let arbSort = { col: 'spread', dir: 'desc' };
 
 // ── Navigation ──
 $$('.nav-tab').forEach(tab => {
@@ -278,19 +288,30 @@ function renderPanels(exchanges) {
       \`<div class="dex-filter \${d==='all' ? (activeDexFilters.size===0?'active':'') : (activeDexFilters.has(d)?'active':'')}" data-dex="\${d}">\${d}</div>\`
     ).join('')}</div>\` : '';
 
+    // Dex balance breakdown (dex pools are subsets of main balance, not additive)
+    const dexBal = ex.dexBalances || null;
+    const dexBreakdown = (field) => {
+      if (!dexBal || dexBal.length < 1) return '';
+      return '<div style="font-size:10px;color:var(--muted);margin-top:2px">' +
+        dexBal.map(d => d.name + ': $' + fmt(Number(d.balance[field]))).join(' · ') + '</div>';
+    };
+
     return \`<div class="exchange-panel \${isActive?'active':''}" id="panel-\${ex.name}">
       <div class="balance-bar">
-        <div class="balance-item"><div class="label">Equity</div><div class="val">$\${fmt(ex.balance.equity)}</div></div>
-        <div class="balance-item"><div class="label">Available</div><div class="val">$\${fmt(ex.balance.available)}</div></div>
-        <div class="balance-item"><div class="label">Margin Used</div><div class="val">$\${fmt(ex.balance.marginUsed)}</div></div>
-        <div class="balance-item"><div class="label">Unrealized PnL</div><div class="val \${pnlClass(ex.balance.unrealizedPnl)}">\${pnlSign(ex.balance.unrealizedPnl)}</div></div>
+        <div class="balance-item"><div class="label">Equity</div><div class="val">$\${fmt(ex.balance.equity)}</div>\${dexBreakdown('equity')}</div>
+        <div class="balance-item"><div class="label">Available</div><div class="val">$\${fmt(ex.balance.available)}</div>\${dexBreakdown('available')}</div>
+        <div class="balance-item"><div class="label">Margin Used</div><div class="val">$\${fmt(ex.balance.marginUsed)}</div>\${dexBreakdown('marginUsed')}</div>
+        <div class="balance-item"><div class="label">Unrealized PnL</div><div class="val \${pnlClass(ex.balance.unrealizedPnl)}">\${pnlSign(ex.balance.unrealizedPnl)}</div>\${dexBreakdown('unrealizedPnl')}</div>
       </div>
       <div class="section-title">Positions (\${filteredPositions.length}\${isHL && activeDexFilters.size>0 ? '/'+ex.positions.length : ''})</div>
       \${dexFilterHtml}
-      \${filteredPositions.length?\`<table><thead><tr>\${isHL?'<th>DEX</th>':''}<th>Symbol</th><th>Side</th><th>Size</th><th>Entry</th><th>Mark</th><th>Liq</th><th>PnL</th><th>Lev</th></tr></thead><tbody>\${filteredPositions.map(p=>{
+      \${filteredPositions.length?\`<table><thead><tr>\${isHL?'<th>DEX</th>':''}<th>Symbol</th><th>Side</th><th>Size</th><th>Entry</th><th>Mark</th><th>Liq</th><th>Value</th><th>PnL</th><th>ROE%</th><th>Lev</th></tr></thead><tbody>\${filteredPositions.map(p=>{
         const dex = getDex(p.symbol);
         const sym = p.symbol.includes(':') ? p.symbol.split(':').slice(1).join(':') : p.symbol;
-        return \`<tr>\${isHL?\`<td style="color:var(--purple);font-size:11px">\${dex}</td>\`:''}<td>\${sym}</td><td class="side-\${p.side}">\${p.side.toUpperCase()}</td><td>\${p.size}</td><td>$\${fmt(p.entryPrice)}</td><td>$\${fmt(p.markPrice)}</td><td>\${p.liquidationPrice==='N/A'?'N/A':'$'+fmt(p.liquidationPrice)}</td><td class="\${pnlClass(p.unrealizedPnl)}">\${pnlSign(p.unrealizedPnl)}</td><td>\${p.leverage}x</td></tr>\`;
+        const notional = Math.abs(Number(p.size)) * Number(p.markPrice);
+        const margin = p.leverage > 0 ? notional / p.leverage : notional;
+        const roe = margin > 0 ? (Number(p.unrealizedPnl) / margin * 100) : 0;
+        return \`<tr>\${isHL?\`<td style="color:var(--purple);font-size:11px">\${dex}</td>\`:''}<td>\${sym}</td><td class="side-\${p.side}">\${p.side.toUpperCase()}</td><td>\${p.size}</td><td>$\${fmt(p.entryPrice)}</td><td>$\${fmt(p.markPrice)}</td><td>\${p.liquidationPrice==='N/A'?'N/A':'$'+fmt(p.liquidationPrice)}</td><td style="color:var(--muted)">$\${fmt(notional)}</td><td class="\${pnlClass(p.unrealizedPnl)}">\${pnlSign(p.unrealizedPnl)}</td><td class="\${pnlClass(p.unrealizedPnl)}">\${roe>=0?'+':''}\${fmt(roe,1)}%</td><td>\${p.leverage}x</td></tr>\`;
       }).join('')}</tbody></table>\`:'<div class="empty-msg">No open positions</div>'}
       <div class="section-title">Open Orders (\${filteredOrders.length})</div>
       \${filteredOrders.length?\`<table><thead><tr>\${isHL?'<th>DEX</th>':''}<th>Symbol</th><th>Side</th><th>Type</th><th>Price</th><th>Size</th><th>Filled</th><th>Status</th></tr></thead><tbody>\${filteredOrders.map(o=>{
@@ -334,35 +355,90 @@ function renderArb() {
   // Summary cards
   const opps = arbData.opportunities || [];
   const bestSpread = opps.length ? opps[0].spreadAnnual : 0;
+  const bestDaily = opps.length ? Math.max(...opps.map(o=>o.estHourlyUsd*24)) : 0;
   const totalOpps = opps.length;
   const highSpread = opps.filter(o=>o.spreadAnnual>=50).length;
   $('#arb-summary').innerHTML = [
-    {label:'Best Spread',value:fmt(bestSpread,1)+'%',cls:bestSpread>=50?'green':bestSpread>=20?'':''  },
+    {label:'Best Spread',value:fmt(bestSpread,1)+'%',cls:bestSpread>=50?'green':''},
+    {label:'Best Daily ($1k)',value:'$'+fmt(bestDaily,2),cls:bestDaily>1?'green':''},
     {label:'Opportunities (>5%)',value:totalOpps,cls:''},
     {label:'High Spread (>50%)',value:highSpread,cls:highSpread>0?'green':''},
   ].map(c=>\`<div class="arb-card"><div class="label">\${c.label}</div><div class="value \${c.cls}">\${c.value}</div></div>\`).join('');
 
-  // Table
   if (!opps.length) { $('#arb-table').innerHTML='<div class="empty-msg">No arb opportunities found (>5% annual spread)</div>'; return; }
-  $('#arb-table').innerHTML = \`<table>
-    <thead><tr><th>Symbol</th><th>Spread (Ann.)</th><th>Long</th><th>Short</th><th>Est $/hr ($1k)</th>\${['pacifica','hyperliquid','lighter'].map(e=>\`<th>\${e.slice(0,3).toUpperCase()}</th>\`).join('')}</tr></thead>
-    <tbody>\${opps.map(o => {
+
+  // Sort
+  const sorted = [...opps].sort((a,b) => {
+    let va, vb;
+    switch(arbSort.col) {
+      case 'symbol': return arbSort.dir==='asc'?a.symbol.localeCompare(b.symbol):b.symbol.localeCompare(a.symbol);
+      case 'spread': va=a.spreadAnnual; vb=b.spreadAnnual; break;
+      case 'income': va=a.estHourlyUsd; vb=b.estHourlyUsd; break;
+      default: va=a.spreadAnnual; vb=b.spreadAnnual;
+    }
+    return arbSort.dir==='asc' ? va-vb : vb-va;
+  });
+
+  const maxSpread = Math.max(...opps.map(o=>o.spreadAnnual), 1);
+  const sortH = (col, label) => {
+    const active = arbSort.col===col;
+    const arrow = active ? (arbSort.dir==='desc'?' \\u2193':' \\u2191') : '';
+    return \`<th class="sortable" data-sort="\${col}" style="\${active?'color:var(--cyan)':''}">\${label}\${arrow}</th>\`;
+  };
+
+  $('#arb-table').innerHTML = \`<table id="arb-tbl">
+    <thead><tr>
+      \${sortH('symbol','Symbol')}
+      \${sortH('spread','Spread')}
+      <th>Strategy</th>
+      <th>Mark</th>
+      \${sortH('income','Est Income ($1k)')}
+      \${['pacifica','hyperliquid','lighter'].map(e=>\`<th>\${e.slice(0,3).toUpperCase()}</th>\`).join('')}
+    </tr></thead>
+    <tbody>\${sorted.map(o => {
       const rateMap = {};
       o.rates.forEach(r => rateMap[r.exchange] = r);
+      const daily = o.estHourlyUsd * 24;
+      const monthly = daily * 30;
+      const barW = Math.min(100, (o.spreadAnnual / maxSpread) * 100);
+      const barColor = o.spreadAnnual>=50?'var(--green)':o.spreadAnnual>=20?'var(--yellow)':'var(--muted)';
+      const bestMark = o.rates.reduce((best,r) => r.markPrice>0?r.markPrice:best, 0);
       return \`<tr>
-        <td>\${o.symbol}</td>
-        <td class="\${spreadClass(o.spreadAnnual)}">\${fmt(o.spreadAnnual,1)}%</td>
-        <td class="side-long">\${o.longExchange.slice(0,3).toUpperCase()}</td>
-        <td class="side-short">\${o.shortExchange.slice(0,3).toUpperCase()}</td>
-        <td>\${o.estHourlyUsd>0?'$'+fmt(o.estHourlyUsd,4):'-'}</td>
+        <td style="font-weight:600">\${o.symbol}</td>
+        <td>
+          <div class="\${spreadClass(o.spreadAnnual)}">\${fmt(o.spreadAnnual,1)}%</div>
+          <div class="spread-bar"><div class="spread-bar-fill" style="width:\${barW}%;background:\${barColor}"></div></div>
+        </td>
+        <td>
+          <div style="font-size:12px"><span class="side-long">Long</span> <span style="color:var(--cyan);font-weight:600">\${o.longExchange.slice(0,3).toUpperCase()}</span></div>
+          <div style="font-size:12px"><span class="side-short">Short</span> <span style="color:var(--cyan);font-weight:600">\${o.shortExchange.slice(0,3).toUpperCase()}</span></div>
+        </td>
+        <td style="color:var(--muted);font-size:12px">\${bestMark>0?'$'+fmt(bestMark):'-'}</td>
+        <td>
+          <div style="font-weight:600;color:\${daily>0?'var(--green)':'var(--muted)'}">\${daily>0?'$'+fmt(daily,2)+'/d':'-'}</div>
+          <div style="font-size:11px;color:var(--muted)">\${monthly>0?'$'+fmt(monthly,0)+'/mo':''}</div>
+        </td>
         \${['pacifica','hyperliquid','lighter'].map(ex => {
           const r = rateMap[ex];
-          if (!r) return '<td class="rate-neutral">-</td>';
-          return \`<td class="rate-cell \${rateClass(r.annualizedPct)}">\${fmt(r.annualizedPct,1)}%</td>\`;
+          if (!r) return '<td style="text-align:center;color:var(--muted)">-</td>';
+          return \`<td style="text-align:center">
+            <div class="rate-cell \${rateClass(r.annualizedPct)}" style="font-size:12px">\${(r.hourlyRate*100).toFixed(4)}%/h</div>
+            <div style="font-size:10px;color:var(--muted)">\${fmt(r.annualizedPct,1)}% ann.</div>
+          </td>\`;
         }).join('')}
       </tr>\`;
     }).join('')}</tbody>
   </table>\`;
+
+  // Bind sort clicks
+  $$('#arb-tbl th.sortable').forEach(th => {
+    th.onclick = () => {
+      const col = th.dataset.sort;
+      if (arbSort.col===col) { arbSort.dir = arbSort.dir==='desc'?'asc':'desc'; }
+      else { arbSort.col=col; arbSort.dir='desc'; }
+      renderArb();
+    };
+  });
 }
 
 function renderDexRates() {

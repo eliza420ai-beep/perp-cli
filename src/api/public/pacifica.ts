@@ -1,4 +1,5 @@
 import { PACIFICA_API_URL } from "./urls.js";
+import { withCache, TTL_MARKET } from "../../cache.js";
 
 // ── Types ──
 
@@ -11,25 +12,29 @@ export interface PacificaAsset {
 
 // ── Fetchers ──
 
-export async function fetchPacificaPrices(): Promise<PacificaAsset[]> {
-  try {
-    const res = await fetch(PACIFICA_API_URL);
-    const json = await res.json();
-    const data = (json as Record<string, unknown>).data ?? json;
-    if (!Array.isArray(data)) return [];
-    return data.map((p: Record<string, unknown>) => ({
-      symbol: String(p.symbol ?? ""),
-      funding: Number(p.funding ?? 0),
-      mark: Number(p.mark ?? 0),
-      nextFunding: p.next_funding ? Number(p.next_funding) : undefined,
-    }));
-  } catch {
-    return [];
-  }
+export function fetchPacificaPrices(): Promise<PacificaAsset[]> {
+  return withCache("pub:pac:prices", TTL_MARKET, async () => {
+    try {
+      const res = await fetch(PACIFICA_API_URL);
+      const json = await res.json();
+      const data = (json as Record<string, unknown>).data ?? json;
+      if (!Array.isArray(data)) return [];
+      return data.map((p: Record<string, unknown>) => ({
+        symbol: String(p.symbol ?? ""),
+        funding: Number(p.next_funding ?? p.funding ?? 0),
+        mark: Number(p.mark ?? 0),
+        nextFunding: p.next_funding ? Number(p.next_funding) : undefined,
+      }));
+    } catch {
+      return [];
+    }
+  });
 }
 
 export function fetchPacificaPricesRaw(): Promise<unknown> {
-  return fetch(PACIFICA_API_URL).then(r => r.json()).catch(() => null);
+  return withCache("pub:pac:prices:raw", TTL_MARKET, () =>
+    fetch(PACIFICA_API_URL).then(r => r.json()).catch(() => null),
+  );
 }
 
 export function parsePacificaRaw(raw: unknown): { rates: Map<string, number>; prices: Map<string, number> } {
@@ -40,7 +45,7 @@ export function parsePacificaRaw(raw: unknown): { rates: Map<string, number>; pr
   for (const p of data as Record<string, unknown>[]) {
     const sym = String(p.symbol ?? "");
     if (!sym) continue;
-    rates.set(sym, Number(p.funding ?? 0));
+    rates.set(sym, Number(p.next_funding ?? p.funding ?? 0));
     const mark = Number(p.mark ?? p.price ?? 0);
     if (mark > 0) prices.set(sym, mark);
   }

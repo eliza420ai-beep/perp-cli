@@ -1,4 +1,5 @@
 import { HYPERLIQUID_API_URL } from "./urls.js";
+import { withCache, TTL_MARKET } from "../../cache.js";
 
 // ── Types ──
 
@@ -20,26 +21,30 @@ function hlPost(type: string): Promise<unknown> {
 
 // ── Fetchers ──
 
-export async function fetchHyperliquidMeta(): Promise<HyperliquidAsset[]> {
-  try {
-    const json = await hlPost("metaAndAssetCtxs") as unknown[];
-    const universe = ((json[0] ?? {}) as Record<string, unknown>).universe ?? [];
-    const ctxs = (json[1] ?? []) as Record<string, unknown>[];
-    return (universe as Record<string, unknown>[]).map((asset, i) => {
-      const ctx = (ctxs[i] ?? {}) as Record<string, unknown>;
-      return {
-        symbol: String(asset.name ?? ""),
-        funding: Number(ctx.funding ?? 0),
-        markPx: Number(ctx.markPx ?? 0),
-      };
-    });
-  } catch {
-    return [];
-  }
+export function fetchHyperliquidMeta(): Promise<HyperliquidAsset[]> {
+  return withCache("pub:hl:metaAndAssetCtxs", TTL_MARKET, async () => {
+    try {
+      const json = await hlPost("metaAndAssetCtxs") as unknown[];
+      const universe = ((json[0] ?? {}) as Record<string, unknown>).universe ?? [];
+      const ctxs = (json[1] ?? []) as Record<string, unknown>[];
+      return (universe as Record<string, unknown>[]).map((asset, i) => {
+        const ctx = (ctxs[i] ?? {}) as Record<string, unknown>;
+        return {
+          symbol: String(asset.name ?? ""),
+          funding: Number(ctx.funding ?? 0),
+          markPx: Number(ctx.markPx ?? 0),
+        };
+      });
+    } catch {
+      return [];
+    }
+  });
 }
 
 export function fetchHyperliquidMetaRaw(): Promise<unknown> {
-  return hlPost("metaAndAssetCtxs").catch(() => null);
+  return withCache("pub:hl:metaAndAssetCtxs:raw", TTL_MARKET, () =>
+    hlPost("metaAndAssetCtxs").catch(() => null),
+  );
 }
 
 export function parseHyperliquidMetaRaw(raw: unknown): { rates: Map<string, number>; prices: Map<string, number> } {
@@ -60,16 +65,20 @@ export function parseHyperliquidMetaRaw(raw: unknown): { rates: Map<string, numb
   return { rates, prices };
 }
 
-export async function fetchHyperliquidAllMids(): Promise<Record<string, string>> {
-  try {
-    return await hlPost("allMids") as Record<string, string>;
-  } catch {
-    return {};
-  }
+export function fetchHyperliquidAllMids(): Promise<Record<string, string>> {
+  return withCache("pub:hl:allMids", TTL_MARKET, async () => {
+    try {
+      return await hlPost("allMids") as Record<string, string>;
+    } catch {
+      return {};
+    }
+  });
 }
 
 export function fetchHyperliquidAllMidsRaw(): Promise<unknown> {
-  return hlPost("allMids").catch(() => null);
+  return withCache("pub:hl:allMids:raw", TTL_MARKET, () =>
+    hlPost("allMids").catch(() => null),
+  );
 }
 
 // ── Health check ──

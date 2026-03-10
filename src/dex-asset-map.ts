@@ -102,7 +102,12 @@ async function hlInfoPost(body: Record<string, unknown>): Promise<unknown> {
 /**
  * Fetch all assets from all Hyperliquid dexes (native + deployed).
  */
-export async function fetchAllDexAssets(): Promise<DexAsset[]> {
+export function fetchAllDexAssets(): Promise<DexAsset[]> {
+  const { withCache, TTL_MARKET } = require("./cache.js") as typeof import("./cache.js");
+  return withCache("pub:hl:allDexAssets", TTL_MARKET, () => _fetchAllDexAssetsLive());
+}
+
+async function _fetchAllDexAssetsLive(): Promise<DexAsset[]> {
   const allMetas = await hlInfoPost({ type: "allPerpMetas" }) as Record<string, unknown>[];
   if (!Array.isArray(allMetas)) return [];
 

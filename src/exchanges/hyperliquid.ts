@@ -20,9 +20,7 @@ export class HyperliquidAdapter implements ExchangeAdapter {
   private _assetMapReverse: Map<number, string> = new Map();
   /** HIP-3 deployed perp dex name. Empty string = native (validator) perps. */
   private _dex: string = "";
-  /** Short-lived cache to deduplicate clearinghouseState calls within a poll cycle */
-  private _chsCache: { data: Record<string, unknown>; ts: number } | null = null;
-  private static readonly CHS_TTL = 3000; // 3s
+  // In-memory cache removed — using file-based cache (src/cache.ts) for cross-process dedup
 
   constructor(privateKey: string, testnet = false) {
     this.sdk = new Hyperliquid({
@@ -185,17 +183,16 @@ export class HyperliquidAdapter implements ExchangeAdapter {
     };
   }
 
-  /** Cached clearinghouseState — deduplicates calls within 3s window */
+  /** Always fetches live clearinghouseState, writes result to shared cache for dashboard */
   private async _getClearinghouseState(): Promise<Record<string, unknown>> {
-    const now = Date.now();
-    if (this._chsCache && now - this._chsCache.ts < HyperliquidAdapter.CHS_TTL) {
-      return this._chsCache.data;
-    }
-    const state = this._dex
-      ? await this._infoPost({ type: "clearinghouseState", user: this._address, dex: this._dex }) as Record<string, unknown>
-      : await this.sdk.info.perpetuals.getClearinghouseState(this._address);
-    this._chsCache = { data: state as Record<string, unknown>, ts: now };
-    return state as Record<string, unknown>;
+    const { fetchAndCache, TTL_ACCOUNT } = await import("../cache.js");
+    const key = this._dex ? `acct:hl:chs:${this._address}:${this._dex}` : `acct:hl:chs:${this._address}`;
+    return fetchAndCache(key, TTL_ACCOUNT, async () => {
+      const state = this._dex
+        ? await this._infoPost({ type: "clearinghouseState", user: this._address, dex: this._dex }) as Record<string, unknown>
+        : await this.sdk.info.perpetuals.getClearinghouseState(this._address);
+      return state as Record<string, unknown>;
+    });
   }
 
   async getBalance(): Promise<ExchangeBalance> {
@@ -207,7 +204,13 @@ export class HyperliquidAdapter implements ExchangeAdapter {
     let equity = Number(margin.accountValue ?? cross.accountValue ?? 0);
     let available = Number(s?.withdrawable ?? 0);
     const marginUsed = Number(margin.totalMarginUsed ?? cross.totalMarginUsed ?? 0);
-    const unrealizedPnl = Number(margin.totalRawUsd ?? 0);
+    // Sum unrealized PnL directly from positions (reliable for both main + dex accounts)
+    const positions = (s?.assetPositions ?? []) as Record<string, unknown>[];
+    let unrealizedPnl = 0;
+    for (const entry of positions) {
+      const pos = (entry.position ?? entry) as Record<string, unknown>;
+      unrealizedPnl += Number(pos.unrealizedPnl ?? 0);
+    }
 
     // Unified account: perp state may show 0 while funds are in spot
     if (equity === 0 && available === 0) {
@@ -275,19 +278,27 @@ export class HyperliquidAdapter implements ExchangeAdapter {
     }));
   }
 
+  private async _invalidateAccountCache() {
+    try { const { invalidateCache } = await import("../cache.js"); invalidateCache("acct"); } catch { /* ignore */ }
+  }
+
   async marketOrder(symbol: string, side: "buy" | "sell", size: string) {
     if (this._dex) {
-      return this._dexMarketOrder(symbol, side, size);
+      const r = await this._dexMarketOrder(symbol, side, size);
+      await this._invalidateAccountCache();
+      return r;
     }
     // Suppress SDK console.log noise (slippage price, decimals, order details)
     const origLog = console.log;
     console.log = () => {};
     try {
-      return await this.sdk.custom.marketOpen(
+      const result = await this.sdk.custom.marketOpen(
         symbol.toUpperCase(),
         side === "buy",
         parseFloat(size),
       );
+      await this._invalidateAccountCache();
+      return result;
     } finally {
       console.log = origLog;
     }
@@ -429,8 +440,9 @@ export class HyperliquidAdapter implements ExchangeAdapter {
   async limitOrder(symbol: string, side: "buy" | "sell", price: string, size: string, opts?: { reduceOnly?: boolean; tif?: string }) {
     const tif = (opts?.tif ?? "Gtc") as import("hyperliquid").Tif;
     const reduceOnly = opts?.reduceOnly ?? false;
+    let result;
     if (this._dex) {
-      return this._rawPlaceOrder({
+      result = await this._rawPlaceOrder({
         assetIndex: this.getAssetIndex(symbol.toUpperCase()),
         isBuy: side === "buy",
         price,
@@ -438,22 +450,27 @@ export class HyperliquidAdapter implements ExchangeAdapter {
         orderType: { limit: { tif } },
         reduceOnly,
       });
+    } else {
+      result = await this.sdk.exchange.placeOrder({
+        coin: symbol.toUpperCase(),
+        is_buy: side === "buy",
+        sz: parseFloat(size),
+        limit_px: parseFloat(price),
+        order_type: { limit: { tif } },
+        reduce_only: reduceOnly,
+      });
     }
-    return this.sdk.exchange.placeOrder({
-      coin: symbol.toUpperCase(),
-      is_buy: side === "buy",
-      sz: parseFloat(size),
-      limit_px: parseFloat(price),
-      order_type: { limit: { tif } },
-      reduce_only: reduceOnly,
-    });
+    await this._invalidateAccountCache();
+    return result;
   }
 
   async cancelOrder(symbol: string, orderId: string) {
-    return this.sdk.exchange.cancelOrder({
+    const result = await this.sdk.exchange.cancelOrder({
       coin: symbol.toUpperCase(),
       o: parseInt(orderId),
     });
+    await this._invalidateAccountCache();
+    return result;
   }
 
   async cancelAllOrders(symbol?: string) {

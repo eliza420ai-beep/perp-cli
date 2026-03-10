@@ -24,10 +24,7 @@ export class PacificaAdapter implements ExchangeAdapter {
   readonly keypair: Keypair;
   private account: string;
   private signMessage: (msg: Uint8Array) => Promise<Uint8Array>;
-  /** Short-lived caches to deduplicate API calls within a poll cycle (3s TTL) */
-  private _pricesCache: { data: Awaited<ReturnType<PacificaClient["getPrices"]>>; ts: number } | null = null;
-  private _positionsCache: { data: Awaited<ReturnType<PacificaClient["getPositions"]>>; ts: number } | null = null;
-  private static readonly CACHE_TTL = 3000;
+  // In-memory caches removed — using file-based cache (src/cache.ts) for cross-process dedup
 
   constructor(keypair: Keypair, network: Network = "mainnet", builderCode?: string) {
     this.keypair = keypair;
@@ -37,19 +34,17 @@ export class PacificaAdapter implements ExchangeAdapter {
   }
 
   private async _getPrices() {
-    const now = Date.now();
-    if (this._pricesCache && now - this._pricesCache.ts < PacificaAdapter.CACHE_TTL) return this._pricesCache.data;
-    const data = await this.client.getPrices();
-    this._pricesCache = { data, ts: now };
-    return data;
+    const { fetchAndCache, TTL_ACCOUNT } = await import("../cache.js");
+    return fetchAndCache(`acct:pac:prices:${this.account.slice(0, 8)}`, TTL_ACCOUNT, () =>
+      this.client.getPrices(),
+    );
   }
 
   private async _getPositions() {
-    const now = Date.now();
-    if (this._positionsCache && now - this._positionsCache.ts < PacificaAdapter.CACHE_TTL) return this._positionsCache.data;
-    const data = await this.client.getPositions(this.account);
-    this._positionsCache = { data, ts: now };
-    return data;
+    const { fetchAndCache, TTL_ACCOUNT } = await import("../cache.js");
+    return fetchAndCache(`acct:pac:positions:${this.account.slice(0, 8)}`, TTL_ACCOUNT, () =>
+      this.client.getPositions(this.account),
+    );
   }
 
   get publicKey(): string {
@@ -76,7 +71,7 @@ export class PacificaAdapter implements ExchangeAdapter {
         symbol: m.symbol,
         markPrice: p?.mark ?? "-",
         indexPrice: p?.oracle ?? "-",
-        fundingRate: m.funding_rate,
+        fundingRate: m.next_funding_rate ?? m.funding_rate,
         volume24h: p?.volume_24h ?? "-",
         openInterest: p?.open_interest ?? "-",
         maxLeverage: m.max_leverage,

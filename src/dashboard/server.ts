@@ -202,14 +202,15 @@ async function pollMarkets(exchanges: DashboardExchange[]): Promise<void> {
 }
 
 async function pollSnapshot(exchanges: DashboardExchange[]): Promise<DashboardSnapshot> {
+  const { withCache, TTL_ACCOUNT } = await import("../cache.js");
   const emptyBalance: ExchangeBalance = { equity: "0", available: "0", marginUsed: "0", unrealizedPnl: "0" };
   const results = await Promise.allSettled(
     exchanges.map(async (ex) => {
-      // Core data only: balance + positions + orders (no markets — those poll on 30s cycle)
+      // Dashboard reads from cache if fresh (CLI writes fresh data via fetchAndCache)
       const [balance, positions, orders] = await Promise.all([
-        ex.adapter.getBalance().catch(() => emptyBalance),
-        ex.adapter.getPositions().catch(() => [] as ExchangePosition[]),
-        ex.adapter.getOpenOrders().catch(() => [] as ExchangeOrder[]),
+        withCache(`dash:${ex.name}:balance`, TTL_ACCOUNT, () => ex.adapter.getBalance()).catch(() => emptyBalance),
+        withCache(`dash:${ex.name}:positions`, TTL_ACCOUNT, () => ex.adapter.getPositions()).catch(() => [] as ExchangePosition[]),
+        withCache(`dash:${ex.name}:orders`, TTL_ACCOUNT, () => ex.adapter.getOpenOrders()).catch(() => [] as ExchangeOrder[]),
       ]);
       return { name: ex.name, balance, positions, orders, topMarkets: cachedMarkets.get(ex.name) ?? [] };
     }),
@@ -219,13 +220,21 @@ async function pollSnapshot(exchanges: DashboardExchange[]): Promise<DashboardSn
     .filter((r): r is PromiseFulfilledResult<DashboardSnapshot["exchanges"][0]> => r.status === "fulfilled")
     .map((r) => r.value);
 
-  // Merge hl:* dex entries into main hyperliquid (same account, shared balance)
+  // Merge hl:* dex entries into main hyperliquid (same wallet, dex pools are subsets of main balance)
   const hlEntry = exchangeData.find(e => e.name === "hyperliquid");
   if (hlEntry) {
     const dexEntries = exchangeData.filter(e => e.name.startsWith("hl:") && e.name !== "hyperliquid");
+    // Main accountValue already includes dex pool funds — DON'T add dex balances (would double-count).
+    // Only merge positions/orders, and attach dex breakdown for UI display.
+    const dexBalances: { name: string; balance: ExchangeBalance }[] = [];
     for (const dex of dexEntries) {
+      const dexName = dex.name.replace("hl:", "");
+      dexBalances.push({ name: dexName, balance: { ...dex.balance } });
       hlEntry.positions.push(...dex.positions);
       hlEntry.orders.push(...dex.orders);
+    }
+    if (dexEntries.length > 0) {
+      (hlEntry as Record<string, unknown>).dexBalances = dexBalances;
     }
     exchangeData = exchangeData.filter(e => !e.name.startsWith("hl:") || e.name === "hyperliquid");
   }
