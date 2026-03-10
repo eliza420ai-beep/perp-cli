@@ -477,6 +477,93 @@ export function registerTradeCommands(
       }
     });
 
+  // === Scaled Take-Profit (분할익절) ===
+
+  trade
+    .command("scale-tp <symbol>")
+    .description("Place multiple take-profit limit orders at different price levels (분할익절)")
+    .requiredOption("--levels <levels>", "Comma-separated price:percent pairs (e.g., 72000:25,75000:25,80000:50)")
+    .option("--size <size>", "Override total position size (default: uses current position)")
+    .action(async (symbol: string, opts: { levels: string; size?: string }) => {
+      const sym = symbol.toUpperCase();
+      const adapter = await getAdapter();
+
+      // Parse levels: "72000:25,75000:25,80000:50"
+      const levels = opts.levels.split(",").map(l => {
+        const [price, pct] = l.trim().split(":");
+        if (!price || !pct) errorAndExit(`Invalid level format: ${l}. Use price:percent (e.g., 72000:25)`);
+        return { price: price.trim(), pct: parseFloat(pct.trim()) };
+      });
+
+      // Validate percentages sum to 100
+      const totalPct = levels.reduce((s, l) => s + l.pct, 0);
+      if (Math.abs(totalPct - 100) > 0.01) {
+        errorAndExit(`Percentages must sum to 100%. Got: ${totalPct}%`);
+      }
+
+      // Get current position to determine size and side
+      let totalSize: number;
+      let closeSide: "buy" | "sell";
+
+      if (opts.size) {
+        totalSize = parseFloat(opts.size);
+        // Need to know position side — fetch it
+        const positions = await adapter.getPositions();
+        const pos = positions.find(p => p.symbol.toUpperCase() === sym);
+        closeSide = pos?.side === "short" ? "buy" : "sell";
+      } else {
+        const positions = await adapter.getPositions();
+        const pos = positions.find(p => p.symbol.toUpperCase() === sym);
+        if (!pos) errorAndExit(`No open position for ${sym}. Use --size to specify manually.`);
+        totalSize = parseFloat(pos.size);
+        closeSide = pos.side === "long" ? "sell" : "buy";
+      }
+
+      if (dryRunGuard("scale_tp", {
+        exchange: adapter.name, symbol: sym, side: closeSide,
+        totalSize: totalSize.toString(),
+        levels: levels.map(l => `${l.price}@${l.pct}%`).join(", "),
+      })) return;
+
+      // Place reduce-only limit orders at each level
+      const results: Array<{ price: string; size: string; pct: number; result: unknown }> = [];
+      for (const level of levels) {
+        const levelSize = (totalSize * level.pct / 100).toString();
+        try {
+          const result = await adapter.limitOrder(sym, closeSide, level.price, levelSize, { reduceOnly: true });
+          results.push({ price: level.price, size: levelSize, pct: level.pct, result });
+          logExecution({
+            type: "limit_order", exchange: adapter.name, symbol: sym,
+            side: closeSide, size: levelSize, price: level.price,
+            status: "success", dryRun: false,
+            meta: { action: "scale-tp", pct: level.pct, reduceOnly: true },
+          });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          logExecution({
+            type: "limit_order", exchange: adapter.name, symbol: sym,
+            side: closeSide, size: levelSize, price: level.price,
+            status: "failed", dryRun: false, error: msg,
+            meta: { action: "scale-tp", pct: level.pct },
+          });
+          if (isJson()) {
+            results.push({ price: level.price, size: levelSize, pct: level.pct, result: { error: msg } });
+          } else {
+            console.log(chalk.red(`  Failed: ${level.price} x ${levelSize} — ${msg}`));
+          }
+        }
+      }
+
+      if (isJson()) return printJson(jsonOk({ symbol: sym, side: closeSide, totalSize, levels: results }));
+
+      console.log(chalk.green(`\n  Scaled TP set for ${sym} on ${adapter.name}:\n`));
+      for (const r of results) {
+        const status = (r.result as Record<string, unknown>)?.error ? chalk.red("FAILED") : chalk.green("OK");
+        console.log(`  ${status}  $${r.price} — ${r.pct}% (${r.size} ${sym})`);
+      }
+      console.log();
+    });
+
   // === Pacifica-only commands ===
 
   trade

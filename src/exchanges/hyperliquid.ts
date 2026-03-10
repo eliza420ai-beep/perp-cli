@@ -414,15 +414,17 @@ export class HyperliquidAdapter implements ExchangeAdapter {
     return result;
   }
 
-  async limitOrder(symbol: string, side: "buy" | "sell", price: string, size: string) {
+  async limitOrder(symbol: string, side: "buy" | "sell", price: string, size: string, opts?: { reduceOnly?: boolean; tif?: string }) {
+    const tif = opts?.tif ?? "Gtc";
+    const reduceOnly = opts?.reduceOnly ?? false;
     if (this._dex) {
       return this._rawPlaceOrder({
         assetIndex: this.getAssetIndex(symbol.toUpperCase()),
         isBuy: side === "buy",
         price,
         size,
-        orderType: { limit: { tif: "Gtc" } },
-        reduceOnly: false,
+        orderType: { limit: { tif } },
+        reduceOnly,
       });
     }
     return this.sdk.exchange.placeOrder({
@@ -430,8 +432,8 @@ export class HyperliquidAdapter implements ExchangeAdapter {
       is_buy: side === "buy",
       sz: parseFloat(size),
       limit_px: parseFloat(price),
-      order_type: { limit: { tif: "Gtc" } },
-      reduce_only: false,
+      order_type: { limit: { tif } },
+      reduce_only: reduceOnly,
     });
   }
 

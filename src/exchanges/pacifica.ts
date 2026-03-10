@@ -150,9 +150,9 @@ export class PacificaAdapter implements ExchangeAdapter {
     );
   }
 
-  async limitOrder(symbol: string, side: "buy" | "sell", price: string, size: string) {
+  async limitOrder(symbol: string, side: "buy" | "sell", price: string, size: string, opts?: { reduceOnly?: boolean; tif?: string }) {
     return this.client.createLimitOrder(
-      { symbol, price, amount: size, side: side === "buy" ? "bid" : "ask", reduce_only: false, tif: "GTC" },
+      { symbol, price, amount: size, side: side === "buy" ? "bid" : "ask", reduce_only: opts?.reduceOnly ?? false, tif: opts?.tif ?? "GTC" },
       this.account,
       this.signMessage
     );
