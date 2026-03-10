@@ -2,6 +2,7 @@
  * Live Dashboard Server — HTTP + WebSocket for real-time portfolio monitoring.
  *
  * Polls all configured exchange adapters and pushes updates to connected clients.
+ * Includes cross-exchange arb data: funding rate comparison + dex arb scan.
  */
 
 import { createServer, type IncomingMessage, type ServerResponse } from "http";
@@ -12,6 +13,24 @@ import { getUI } from "./ui.js";
 export interface DashboardExchange {
   name: string;
   adapter: ExchangeAdapter;
+}
+
+export interface ArbOpportunity {
+  symbol: string;
+  longExchange: string;
+  shortExchange: string;
+  spreadAnnual: number;
+  estHourlyUsd: number;
+  rates: { exchange: string; annualizedPct: number; hourlyRate: number; markPrice: number }[];
+}
+
+export interface DexArbOpportunity {
+  underlying: string;
+  longDex: string;
+  shortDex: string;
+  annualSpread: number;
+  priceGapPct: number;
+  viability: string;
 }
 
 export interface DashboardSnapshot {
@@ -31,13 +50,22 @@ export interface DashboardSnapshot {
     positionCount: number;
     orderCount: number;
   };
+  arb: {
+    opportunities: ArbOpportunity[];
+    dexArb: DexArbOpportunity[];
+    exchangeStatus: Record<string, string>;
+  };
 }
 
 export interface DashboardOpts {
   port?: number;
   pollInterval?: number; // ms, default 5000
+  arbInterval?: number;  // ms, default 30000 (arb data is heavier, poll less often)
   signal?: AbortSignal;
 }
+
+// Cached arb data (polled less frequently)
+let cachedArb: DashboardSnapshot["arb"] = { opportunities: [], dexArb: [], exchangeStatus: {} };
 
 /**
  * Find an available port starting from the given port.
@@ -58,6 +86,59 @@ async function findPort(startPort: number): Promise<number> {
       }
     });
   });
+}
+
+/**
+ * Fetch arb data: cross-exchange funding rates + HIP-3 dex arb.
+ */
+async function pollArbData(): Promise<DashboardSnapshot["arb"]> {
+  const opportunities: ArbOpportunity[] = [];
+  const dexArb: DexArbOpportunity[] = [];
+  let exchangeStatus: Record<string, string> = {};
+
+  try {
+    const { fetchAllFundingRates } = await import("../funding/rates.js");
+    const snapshot = await fetchAllFundingRates({ minSpread: 5 });
+    exchangeStatus = snapshot.exchangeStatus;
+
+    for (const sym of snapshot.symbols.slice(0, 20)) {
+      opportunities.push({
+        symbol: sym.symbol,
+        longExchange: sym.longExchange,
+        shortExchange: sym.shortExchange,
+        spreadAnnual: sym.maxSpreadAnnual,
+        estHourlyUsd: sym.estHourlyIncomeUsd,
+        rates: sym.rates.map((r) => ({
+          exchange: r.exchange,
+          annualizedPct: r.annualizedPct,
+          hourlyRate: r.hourlyRate,
+          markPrice: r.markPrice,
+        })),
+      });
+    }
+  } catch {
+    // funding rates unavailable
+  }
+
+  try {
+    const { scanDexArb } = await import("../dex-asset-map.js");
+    const pairs = await scanDexArb({ minAnnualSpread: 10 });
+
+    for (const p of pairs.slice(0, 15)) {
+      dexArb.push({
+        underlying: p.underlying,
+        longDex: `${p.long.dex}:${p.long.base}`,
+        shortDex: `${p.short.dex}:${p.short.base}`,
+        annualSpread: p.annualSpread,
+        priceGapPct: p.priceGapPct,
+        viability: p.viability,
+      });
+    }
+  } catch {
+    // dex arb unavailable
+  }
+
+  return { opportunities, dexArb, exchangeStatus };
 }
 
 /**
@@ -98,7 +179,7 @@ async function pollSnapshot(exchanges: DashboardExchange[]): Promise<DashboardSn
     totals.orderCount += ex.orders.length;
   }
 
-  return { timestamp: new Date().toISOString(), exchanges: exchangeData, totals };
+  return { timestamp: new Date().toISOString(), exchanges: exchangeData, totals, arb: cachedArb };
 }
 
 /**
@@ -121,6 +202,7 @@ export async function startDashboard(
   opts: DashboardOpts = {},
 ): Promise<{ port: number; close: () => void }> {
   const pollInterval = opts.pollInterval ?? 5000;
+  const arbInterval = opts.arbInterval ?? 30000;
   const requestedPort = opts.port ?? 3456;
   const port = await findPort(requestedPort);
 
@@ -156,24 +238,39 @@ export async function startDashboard(
     }
   });
 
-  // Polling loop
+  // Polling loops
   let pollTimer: ReturnType<typeof setInterval> | null = null;
+  let arbTimer: ReturnType<typeof setInterval> | null = null;
 
   const startPolling = () => {
+    // Account data: every 5s
     pollTimer = setInterval(async () => {
       try {
         const snap = await pollSnapshot(exchanges);
         broadcast(wss, { type: "snapshot", data: snap });
       } catch {
-        // ignore poll errors, will retry next interval
+        // ignore poll errors
       }
     }, pollInterval);
+
+    // Arb data: every 30s (heavier API calls)
+    const pollArb = async () => {
+      try {
+        cachedArb = await pollArbData();
+        broadcast(wss, { type: "arb", data: cachedArb });
+      } catch {
+        // ignore
+      }
+    };
+    pollArb(); // initial fetch
+    arbTimer = setInterval(pollArb, arbInterval);
   };
 
   // Handle abort signal
   if (opts.signal) {
     opts.signal.addEventListener("abort", () => {
       if (pollTimer) clearInterval(pollTimer);
+      if (arbTimer) clearInterval(arbTimer);
       wss.close();
       server.close();
     }, { once: true });
@@ -186,6 +283,7 @@ export async function startDashboard(
         port,
         close: () => {
           if (pollTimer) clearInterval(pollTimer);
+          if (arbTimer) clearInterval(arbTimer);
           wss.close();
           server.close();
         },
