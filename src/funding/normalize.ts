@@ -1,10 +1,10 @@
 /**
  * Funding rate normalization.
  *
- * All three main exchanges report funding rates per HOUR:
+ * Exchange funding rate periods:
  * - Hyperliquid: per 1 HOUR (settles every 1h)
- * - Lighter: per 1 HOUR (settles every 1h)
  * - Pacifica: per 1 HOUR (settles every 1h)
+ * - Lighter: per 8 HOURS (API returns 8h rate, settles every 1h)
  *
  * HIP-3 deployed dexes on Hyperliquid use 8h funding periods.
  *
@@ -19,12 +19,13 @@ const HOURLY_PERIODS = 24 * 365;   // 8760
 const EXCHANGE_FUNDING_HOURS: Record<string, number> = {
   hyperliquid: 1,
   pacifica: 1,
-  lighter: 1,
+  lighter: 8,
 };
 
 /**
  * Get funding period in hours for an exchange.
- * Main exchanges (HL, PAC, LT) are all 1h.
+ * HIP-3 deployed dexes (not in the map) default to 1h (API returns hourly).
+ * HL and PAC are 1h, Lighter API returns 8h rates.
  */
 export function getFundingHours(exchange: string): number {
   return EXCHANGE_FUNDING_HOURS[exchange.toLowerCase()] ?? 1;
