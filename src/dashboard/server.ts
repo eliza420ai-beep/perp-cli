@@ -9,6 +9,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "http";
 import { WebSocketServer, WebSocket } from "ws";
 import type { ExchangeAdapter, ExchangeBalance, ExchangePosition, ExchangeOrder, ExchangeMarketInfo } from "../exchanges/interface.js";
 import { getUI } from "./ui.js";
+import { WsFeedManager, type WsFeedState } from "./ws-feeds.js";
 
 export interface DashboardExchange {
   name: string;
@@ -201,12 +202,37 @@ async function pollMarkets(exchanges: DashboardExchange[]): Promise<void> {
   );
 }
 
-async function pollSnapshot(exchanges: DashboardExchange[]): Promise<DashboardSnapshot> {
+/** Build snapshot from WsFeedManager state (no REST calls needed) */
+function buildSnapshotFromFeeds(feedMgr: WsFeedManager, exchanges: DashboardExchange[]): DashboardSnapshot {
+  const states = feedMgr.getAllStates();
+  let exchangeData: DashboardSnapshot["exchanges"] = [];
+
+  for (const ex of exchanges) {
+    const state = states.get(ex.name);
+    const emptyBal: ExchangeBalance = { equity: "0", available: "0", marginUsed: "0", unrealizedPnl: "0" };
+    exchangeData.push({
+      name: ex.name,
+      balance: state?.balance ?? emptyBal,
+      positions: [...(state?.positions ?? [])],  // copy — mergeAndTotal mutates
+      orders: [...(state?.orders ?? [])],
+      topMarkets: cachedMarkets.get(ex.name) ?? [],
+    });
+  }
+
+  return mergeAndTotal(exchangeData);
+}
+
+/** Legacy REST-based snapshot (used for /api/snapshot fallback) */
+async function pollSnapshot(exchanges: DashboardExchange[], feedMgr?: WsFeedManager): Promise<DashboardSnapshot> {
+  // If feedMgr is available, use WS state directly (no API calls)
+  if (feedMgr) {
+    return buildSnapshotFromFeeds(feedMgr, exchanges);
+  }
+
   const { withCache, TTL_ACCOUNT } = await import("../cache.js");
   const emptyBalance: ExchangeBalance = { equity: "0", available: "0", marginUsed: "0", unrealizedPnl: "0" };
   const results = await Promise.allSettled(
     exchanges.map(async (ex) => {
-      // Dashboard reads from cache if fresh (CLI writes fresh data via fetchAndCache)
       const [balance, positions, orders] = await Promise.all([
         withCache(`dash:${ex.name}:balance`, TTL_ACCOUNT, () => ex.adapter.getBalance()).catch(() => emptyBalance),
         withCache(`dash:${ex.name}:positions`, TTL_ACCOUNT, () => ex.adapter.getPositions()).catch(() => [] as ExchangePosition[]),
@@ -220,6 +246,11 @@ async function pollSnapshot(exchanges: DashboardExchange[]): Promise<DashboardSn
     .filter((r): r is PromiseFulfilledResult<DashboardSnapshot["exchanges"][0]> => r.status === "fulfilled")
     .map((r) => r.value);
 
+  return mergeAndTotal(exchangeData);
+}
+
+/** Merge HL dex entries + compute totals */
+function mergeAndTotal(exchangeData: DashboardSnapshot["exchanges"]): DashboardSnapshot {
   // Merge hl:* dex entries into main hyperliquid (same wallet, dex pools are subsets of main balance)
   const hlEntry = exchangeData.find(e => e.name === "hyperliquid");
   if (hlEntry) {
@@ -279,19 +310,19 @@ export async function startDashboard(
   exchanges: DashboardExchange[],
   opts: DashboardOpts = {},
 ): Promise<{ port: number; close: () => void }> {
-  const pollInterval = opts.pollInterval ?? 5000;
   const arbInterval = opts.arbInterval ?? 30000;
   const requestedPort = opts.port ?? 3456;
   const port = await findPort(requestedPort);
 
   const html = getUI();
+  let feedMgr: WsFeedManager | undefined;
 
   const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     if (req.url === "/" || req.url === "/index.html") {
       res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
       res.end(html);
     } else if (req.url === "/api/snapshot") {
-      pollSnapshot(exchanges).then((snap) => {
+      pollSnapshot(exchanges, feedMgr).then((snap) => {
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify(snap));
       }).catch((err) => {
@@ -305,36 +336,40 @@ export async function startDashboard(
   });
 
   const wss = new WebSocketServer({ server });
+  const hasClients = () => wss.clients.size > 0;
+
+  // ── WS Feed Manager: real-time account data via exchange WS APIs ──
+  let broadcastTimer: ReturnType<typeof setTimeout> | null = null;
+  const BROADCAST_DEBOUNCE_MS = 1000;
+
+  feedMgr = new WsFeedManager(exchanges, {
+    onUpdate: (_exchange, _state) => {
+      // Debounce broadcasts: WS feeds fire rapidly, limit to 1/sec
+      if (broadcastTimer || !hasClients()) return;
+      broadcastTimer = setTimeout(() => {
+        broadcastTimer = null;
+        if (!hasClients()) return;
+        const snap = buildSnapshotFromFeeds(feedMgr!, exchanges);
+        broadcast(wss, { type: "snapshot", data: snap });
+      }, BROADCAST_DEBOUNCE_MS);
+    },
+    signal: opts.signal,
+  });
 
   // Send initial snapshot on connect
   wss.on("connection", async (ws) => {
     try {
-      const snap = await pollSnapshot(exchanges);
+      const snap = await pollSnapshot(exchanges, feedMgr);
       ws.send(JSON.stringify({ type: "snapshot", data: snap }));
     } catch {
       // ignore
     }
   });
 
-  // Polling loops
-  let pollTimer: ReturnType<typeof setInterval> | null = null;
+  // Arb + market data: stays on REST polling (cross-exchange aggregation, no single WS covers it)
   let arbTimer: ReturnType<typeof setInterval> | null = null;
 
-  const hasClients = () => wss.clients.size > 0;
-
-  const startPolling = () => {
-    // Account data: every 5s (only when clients connected)
-    pollTimer = setInterval(async () => {
-      if (!hasClients()) return;
-      try {
-        const snap = await pollSnapshot(exchanges);
-        broadcast(wss, { type: "snapshot", data: snap });
-      } catch {
-        // ignore poll errors
-      }
-    }, pollInterval);
-
-    // Arb + market data: every 30s (heavier API calls)
+  const startArbPolling = () => {
     const pollArbAndMarkets = async () => {
       try {
         const [arbResult] = await Promise.allSettled([
@@ -358,21 +393,26 @@ export async function startDashboard(
   // Handle abort signal
   if (opts.signal) {
     opts.signal.addEventListener("abort", () => {
-      if (pollTimer) clearInterval(pollTimer);
+      if (broadcastTimer) clearTimeout(broadcastTimer);
       if (arbTimer) clearInterval(arbTimer);
+      feedMgr?.close();
       wss.close();
       server.close();
     }, { once: true });
   }
 
   return new Promise((resolve) => {
-    server.listen(port, () => {
-      startPolling();
+    server.listen(port, async () => {
+      // Start WS feeds (connects to exchange WS APIs)
+      await feedMgr!.start();
+      // Start arb REST polling (30s cycle)
+      startArbPolling();
       resolve({
         port,
         close: () => {
-          if (pollTimer) clearInterval(pollTimer);
+          if (broadcastTimer) clearTimeout(broadcastTimer);
           if (arbTimer) clearInterval(arbTimer);
+          feedMgr?.close();
           wss.close();
           server.close();
         },

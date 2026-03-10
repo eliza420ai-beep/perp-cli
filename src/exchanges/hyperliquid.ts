@@ -212,8 +212,8 @@ export class HyperliquidAdapter implements ExchangeAdapter {
       unrealizedPnl += Number(pos.unrealizedPnl ?? 0);
     }
 
-    // Unified account: perp state may show 0 while funds are in spot
-    if (equity === 0 && available === 0) {
+    // Unified account: always include spot USDC balance (perp + spot)
+    if (!this._dex) {
       try {
         const spotState = await this.sdk.info.spot.getSpotClearinghouseState(this._address);
         const balances = spotState?.balances ?? [];
@@ -222,8 +222,8 @@ export class HyperliquidAdapter implements ExchangeAdapter {
           const spotTotal = Number(usdc.total ?? 0);
           const spotHold = Number(usdc.hold ?? 0);
           if (spotTotal > 0) {
-            equity = spotTotal;
-            available = spotTotal - spotHold;
+            equity += spotTotal;
+            available += spotTotal - spotHold;
           }
         }
       } catch {
