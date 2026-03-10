@@ -36,6 +36,7 @@ import { registerPlanCommands } from "./commands/plan.js";
 import { registerFundingCommands } from "./commands/funding.js";
 import { registerBacktestCommands } from "./commands/backtest.js";
 import { loadSettings } from "./settings.js";
+import { setSharedApiNetwork } from "./shared-api.js";
 
 const program = new Command();
 
@@ -328,6 +329,12 @@ program
       process.exit(1);
     }
   });
+
+// Switch shared API URLs if --network testnet is used
+program.hook("preAction", () => {
+  const network = program.opts().network as string;
+  if (network === "testnet") setSharedApiNetwork("testnet");
+});
 
 program.parseAsync().then(() => {
   // Allow a short delay for any pending output, then exit cleanly.
