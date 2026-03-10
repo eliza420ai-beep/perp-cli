@@ -1,4 +1,4 @@
-import type { Side } from "./order";
+import type { Side } from "./order.js";
 
 export interface Position {
   symbol: string;

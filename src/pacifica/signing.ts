@@ -1,5 +1,5 @@
 import bs58 from "bs58";
-import { DEFAULT_EXPIRY_WINDOW } from "./constants";
+import { DEFAULT_EXPIRY_WINDOW } from "./constants.js";
 
 /**
  * Recursively sort all object keys alphabetically.

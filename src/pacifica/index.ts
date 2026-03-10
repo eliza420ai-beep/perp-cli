@@ -1,6 +1,6 @@
 // Core
-export { PacificaClient, type PacificaClientConfig } from "./client";
-export { PacificaWSClient, type PacificaWSConfig } from "./ws-client";
+export { PacificaClient, type PacificaClientConfig } from "./client.js";
+export { PacificaWSClient, type PacificaWSConfig } from "./ws-client.js";
 
 // Signing
 export {
@@ -10,13 +10,13 @@ export {
   signWithWallet,
   buildSignedRequest,
   buildAgentSignedRequest,
-} from "./signing";
+} from "./signing.js";
 
 // Deposit
-export { buildDepositInstruction, deposit } from "./deposit";
+export { buildDepositInstruction, deposit } from "./deposit.js";
 
 // Constants
-export * from "./constants";
+export * from "./constants.js";
 
 // Types
-export * from "./types";
+export * from "./types/index.js";

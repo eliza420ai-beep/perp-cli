@@ -1,5 +1,5 @@
-import { MAINNET_REST, BUILDER_CODE, type Network, getNetworkConfig } from "./constants";
-import { buildSignedRequest, buildAgentSignedRequest } from "./signing";
+import { MAINNET_REST, BUILDER_CODE, type Network, getNetworkConfig } from "./constants.js";
+import { buildSignedRequest, buildAgentSignedRequest } from "./signing.js";
 import type {
   MarketInfo,
   PriceInfo,
@@ -29,7 +29,7 @@ import type {
   CreateLakeParams,
   LakeDepositParams,
   LakeWithdrawParams,
-} from "./types";
+} from "./types/index.js";
 
 type SignMessageFn = (message: Uint8Array) => Promise<Uint8Array>;
 

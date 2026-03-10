@@ -1,11 +1,11 @@
-import { MAINNET_WS, type Network, getNetworkConfig } from "./constants";
-import { buildSignedRequest } from "./signing";
+import { MAINNET_WS, type Network, getNetworkConfig } from "./constants.js";
+import { buildSignedRequest } from "./signing.js";
 import type {
   Channel,
   PublicChannel,
   PrivateChannel,
   WSTradingResponse,
-} from "./types/ws";
+} from "./types/ws.js";
 
 type MessageHandler = (data: unknown) => void;
 type SignMessageFn = (message: Uint8Array) => Promise<Uint8Array>;

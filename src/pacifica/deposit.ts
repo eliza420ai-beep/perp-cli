@@ -5,7 +5,7 @@ import {
   Transaction,
   type TransactionSignature,
 } from "@solana/web3.js";
-import { getNetworkConfig, USDC_DECIMALS, type Network } from "./constants";
+import { getNetworkConfig, USDC_DECIMALS, type Network } from "./constants.js";
 
 const TOKEN_PROGRAM = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
 const ASSOCIATED_TOKEN_PROGRAM = new PublicKey("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL");
