@@ -602,11 +602,17 @@ export function registerArbAutoCommands(
                     `  ${now} EMERGENCY: ${ms.exchange} margin ratio ${ms.marginRatio.toFixed(1)}% — CRITICAL (below 15%)`
                   ));
                   blockedExchanges.add(ms.exchange);
+                  await notifyIfEnabled(webhookUrl, notifyEvents, "margin", {
+                    exchange: ms.exchange, marginPct: ms.marginRatio, threshold: 15,
+                  });
                 } else if (shouldBlockEntries(ms, minMarginPct)) {
                   console.log(chalk.yellow(
                     `  ${now} WARNING: ${ms.exchange} margin ${ms.marginRatio.toFixed(1)}% below ${minMarginPct}% — blocking new entries`
                   ));
                   blockedExchanges.add(ms.exchange);
+                  await notifyIfEnabled(webhookUrl, notifyEvents, "margin", {
+                    exchange: ms.exchange, marginPct: ms.marginRatio, threshold: minMarginPct,
+                  });
                 }
               }
             }
