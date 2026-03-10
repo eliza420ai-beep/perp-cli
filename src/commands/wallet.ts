@@ -334,10 +334,10 @@ export function registerWalletCommands(program: Command, isJson: () => boolean) 
   // ── use (set active wallet for exchange) ──
 
   wallet
-    .command("use <name>")
-    .description("Set active wallet for an exchange")
-    .requiredOption("--for <exchange>", "Exchange to bind (pacifica, hyperliquid, lighter)")
-    .action(async (name: string, opts: { for: string }) => {
+    .command("use <name> [exchange]")
+    .description("Set active wallet for exchange (auto-detects if omitted)")
+    .option("--for <exchange>", "Exchange to bind (legacy alias)")
+    .action(async (name: string, exchangeArg: string | undefined, opts: { for?: string }) => {
       const store = loadStore();
       const entry = store.wallets[name];
       if (!entry) {
@@ -345,23 +345,35 @@ export function registerWalletCommands(program: Command, isJson: () => boolean) 
         process.exit(1);
       }
 
-      const exchange = opts.for.toLowerCase();
-      const needsSolana = exchange === "pacifica";
-      if (needsSolana && entry.type !== "solana") {
-        console.error(chalk.red(`\n  Pacifica requires a Solana wallet. "${name}" is EVM.\n`));
-        process.exit(1);
-      }
-      if (!needsSolana && entry.type !== "evm") {
-        console.error(chalk.red(`\n  ${exchange} requires an EVM wallet. "${name}" is Solana.\n`));
-        process.exit(1);
+      // Resolve exchange: positional arg > --for flag > auto-detect from wallet type
+      const rawExchange = exchangeArg || opts.for;
+      let exchanges: string[];
+
+      if (rawExchange) {
+        const ex = rawExchange.toLowerCase();
+        const needsSolana = ex === "pacifica";
+        if (needsSolana && entry.type !== "solana") {
+          console.error(chalk.red(`\n  Pacifica requires a Solana wallet. "${name}" is EVM.\n`));
+          process.exit(1);
+        }
+        if (!needsSolana && entry.type !== "evm") {
+          console.error(chalk.red(`\n  ${ex} requires an EVM wallet. "${name}" is Solana.\n`));
+          process.exit(1);
+        }
+        exchanges = [ex];
+      } else {
+        // Auto-detect from wallet type
+        exchanges = entry.type === "solana" ? ["pacifica"] : ["hyperliquid", "lighter"];
       }
 
-      store.active[exchange] = name;
+      for (const exchange of exchanges) {
+        store.active[exchange] = name;
+      }
       saveStore(store);
 
-      if (isJson()) return printJson(jsonOk({ exchange, wallet: name, address: entry.address }));
+      if (isJson()) return printJson(jsonOk({ exchanges, wallet: name, address: entry.address }));
 
-      console.log(chalk.green(`\n  ${chalk.white.bold(name)} is now active for ${chalk.cyan(exchange)}`));
+      console.log(chalk.green(`\n  ${chalk.white.bold(name)} is now active for ${chalk.cyan(exchanges.join(", "))}`));
       console.log(chalk.gray(`  Address: ${entry.address}\n`));
     });
 
@@ -487,7 +499,7 @@ export function registerWalletCommands(program: Command, isJson: () => boolean) 
           .filter((e) => e.address);
 
         if (activeEntries.length === 0) {
-          console.error(chalk.gray("\n  No active wallets. Use 'perp wallet use <name> -e <exchange>' to set one.\n"));
+          console.error(chalk.gray("\n  No active wallets. Use 'perp wallet use <name>' to set one.\n"));
           process.exit(1);
         }
 
