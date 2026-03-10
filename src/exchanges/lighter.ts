@@ -337,7 +337,7 @@ export class LighterAdapter implements ExchangeAdapter {
     return this.sendTx(signed);
   }
 
-  async limitOrder(symbol: string, side: "buy" | "sell", price: string, size: string) {
+  async limitOrder(symbol: string, side: "buy" | "sell", price: string, size: string, opts?: { reduceOnly?: boolean; tif?: string }) {
     this.ensureSigner();
     const nonce = await this.getNextNonce();
     const marketIndex = this.getMarketIndex(symbol);
@@ -350,7 +350,7 @@ export class LighterAdapter implements ExchangeAdapter {
       isAsk: side === "sell" ? 1 : 0,
       type: 0, // ORDER_TYPE_LIMIT
       timeInForce: 1, // GTT (Good Till Time) — rests on orderbook
-      reduceOnly: 0,
+      reduceOnly: opts?.reduceOnly ? 1 : 0,
       triggerPrice: 0,
       orderExpiry: -1, // DEFAULT_28_DAY_ORDER_EXPIRY (WASM auto-computes 28 days)
       nonce,

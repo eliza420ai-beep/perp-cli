@@ -156,13 +156,49 @@ async function fetchFundingRates(): Promise<Map<string, { pac: number; hl: numbe
   return map;
 }
 
-async function runDaemonCycle(store: AlertStore): Promise<string[]> {
+async function fetchPositionData(
+  getAdapterFor?: (exchange: string) => Promise<import("../exchanges/interface.js").ExchangeAdapter>,
+): Promise<{ positions: Array<{ exchange: string; symbol: string; pnl: number; side: string; size: string }>; accounts: Array<{ exchange: string; equity: number; marginUsed: number; available: number }> }> {
+  const positions: Array<{ exchange: string; symbol: string; pnl: number; side: string; size: string }> = [];
+  const accounts: Array<{ exchange: string; equity: number; marginUsed: number; available: number }> = [];
+  if (!getAdapterFor) return { positions, accounts };
+
+  for (const exName of ["pacifica", "hyperliquid", "lighter"]) {
+    try {
+      const adapter = await getAdapterFor(exName);
+      const [pos, info] = await Promise.all([
+        adapter.getPositions(),
+        adapter.getAccountInfo(),
+      ]);
+      for (const p of pos) {
+        positions.push({ exchange: exName, symbol: p.symbol, pnl: parseFloat(p.unrealizedPnl || "0"), side: p.side, size: p.size });
+      }
+      const ai = info as Record<string, unknown>;
+      accounts.push({
+        exchange: exName,
+        equity: Number(ai.equity ?? ai.accountValue ?? 0),
+        marginUsed: Number(ai.marginUsed ?? ai.totalMarginUsed ?? 0),
+        available: Number(ai.available ?? ai.withdrawable ?? 0),
+      });
+    } catch { /* exchange not configured or unreachable */ }
+  }
+  return { positions, accounts };
+}
+
+async function runDaemonCycle(
+  store: AlertStore,
+  getAdapterFor?: (exchange: string) => Promise<import("../exchanges/interface.js").ExchangeAdapter>,
+): Promise<string[]> {
   const triggered: string[] = [];
   const activeAlerts = store.alerts.filter(a => a.active);
   if (activeAlerts.length === 0) return triggered;
 
   const prices = await fetchPrices();
   const fundingRates = await fetchFundingRates();
+
+  // Only fetch position data if there are pnl/liquidation alerts
+  const hasPosAlerts = activeAlerts.some(a => a.type === "pnl" || a.type === "liquidation");
+  const posData = hasPosAlerts ? await fetchPositionData(getAdapterFor) : null;
 
   for (const alert of activeAlerts) {
     let fire = false;
@@ -191,6 +227,36 @@ async function runDaemonCycle(store: AlertStore): Promise<string[]> {
       }
     }
 
+    if (alert.type === "pnl" && posData) {
+      const sym = alert.symbol.toUpperCase();
+      const relevantPos = sym === "ALL"
+        ? posData.positions
+        : posData.positions.filter(p => p.symbol.toUpperCase() === sym);
+      const totalPnl = relevantPos.reduce((s, p) => s + p.pnl, 0);
+
+      if (alert.condition === "loss" && totalPnl <= -alert.value) {
+        fire = true;
+        const posInfo = relevantPos.map(p => `${p.exchange} ${p.side} ${p.size}: $${p.pnl.toFixed(2)}`).join("\n");
+        message = `🔴 *${sym}* uPnL: $${totalPnl.toFixed(2)} (threshold: -$${formatUsd(alert.value)})\n${posInfo}`;
+      } else if (alert.condition === "profit" && totalPnl >= alert.value) {
+        fire = true;
+        const posInfo = relevantPos.map(p => `${p.exchange} ${p.side} ${p.size}: $${p.pnl.toFixed(2)}`).join("\n");
+        message = `🟢 *${sym}* uPnL: +$${totalPnl.toFixed(2)} (threshold: $${formatUsd(alert.value)})\n${posInfo}`;
+      }
+    }
+
+    if (alert.type === "liquidation" && posData) {
+      for (const acct of posData.accounts) {
+        if (acct.equity <= 0 || acct.marginUsed <= 0) continue;
+        const marginRatio = ((acct.equity - acct.marginUsed) / acct.equity) * 100;
+        if (marginRatio <= alert.value) {
+          fire = true;
+          message = `⚠️ *${acct.exchange}* margin ratio: ${marginRatio.toFixed(1)}% (threshold: ${alert.value}%)\nEquity: $${formatUsd(acct.equity)} | Margin: $${formatUsd(acct.marginUsed)} | Available: $${formatUsd(acct.available)}`;
+          break; // one exchange triggering is enough
+        }
+      }
+    }
+
     if (fire) {
       triggered.push(alert.id);
       await notify(store, alert, message);
@@ -202,7 +268,11 @@ async function runDaemonCycle(store: AlertStore): Promise<string[]> {
 
 // ── Commands ──────────────────────────────────────
 
-export function registerAlertCommands(program: Command, isJson: () => boolean) {
+export function registerAlertCommands(
+  program: Command,
+  isJson: () => boolean,
+  getAdapterFor?: (exchange: string) => Promise<import("../exchanges/interface.js").ExchangeAdapter>,
+) {
   const alert = program.command("alert").description("Price & funding rate alerts (Telegram/Discord/Slack)");
 
   // ── configure notification channels ──
@@ -237,17 +307,22 @@ export function registerAlertCommands(program: Command, isJson: () => boolean) {
   alert
     .command("add")
     .description("Add a new alert")
-    .requiredOption("-t, --type <type>", "Alert type: price, funding")
-    .requiredOption("-s, --symbol <symbol>", "Symbol (e.g., BTC, ETH, SOL)")
+    .requiredOption("-t, --type <type>", "Alert type: price, funding, pnl, liquidation")
+    .requiredOption("-s, --symbol <symbol>", "Symbol (e.g., BTC, ETH, SOL) or 'ALL' for portfolio-wide")
     .option("--above <price>", "Price above threshold")
     .option("--below <price>", "Price below threshold")
     .option("--spread <pct>", "Funding spread threshold (annual %)")
+    .option("--loss <usd>", "PnL loss threshold in USD (triggers when uPnL drops below -N)")
+    .option("--profit <usd>", "PnL profit threshold in USD (triggers when uPnL exceeds N)")
+    .option("--margin-pct <pct>", "Liquidation proximity: alert when margin ratio below N%")
+    .option("--exchange <name>", "Exchange for pnl/liquidation alerts (default: all)")
     .option("--telegram", "Send to Telegram")
     .option("--discord", "Send to Discord")
     .option("--slack", "Send to Slack")
     .action(async (opts: {
       type: string; symbol: string;
       above?: string; below?: string; spread?: string;
+      loss?: string; profit?: string; marginPct?: string; exchange?: string;
       telegram?: boolean; discord?: boolean; slack?: boolean;
     }) => {
       const channels: string[] = [];
@@ -266,6 +341,13 @@ export function registerAlertCommands(program: Command, isJson: () => boolean) {
       } else if (opts.type === "funding") {
         value = parseFloat(opts.spread || "30");
         condition = "spread";
+      } else if (opts.type === "pnl") {
+        if (opts.loss) { condition = "loss"; value = parseFloat(opts.loss); }
+        else if (opts.profit) { condition = "profit"; value = parseFloat(opts.profit); }
+        else { console.error(chalk.red("  PnL alert needs --loss or --profit")); process.exit(1); }
+      } else if (opts.type === "liquidation") {
+        value = parseFloat(opts.marginPct || "20");
+        condition = "margin_low";
       }
 
       const store = loadAlerts();
@@ -310,7 +392,11 @@ export function registerAlertCommands(program: Command, isJson: () => boolean) {
         const status = a.active ? chalk.green("ON") : chalk.gray("OFF");
         const desc = a.type === "price"
           ? `${a.symbol} ${a.condition} $${formatUsd(a.value)}`
-          : `${a.symbol} spread > ${a.value}%`;
+          : a.type === "funding"
+          ? `${a.symbol} spread > ${a.value}%`
+          : a.type === "pnl"
+          ? `${a.symbol} ${a.condition === "loss" ? "loss > -" : "profit >"} $${formatUsd(a.value)}`
+          : `margin ratio < ${a.value}%`;
         console.log(`  ${status}  ${chalk.white.bold(a.id)}  ${desc}  → ${a.channels.join(", ")}`);
       }
       console.log();
@@ -371,7 +457,7 @@ export function registerAlertCommands(program: Command, isJson: () => boolean) {
       const run = async () => {
         try {
           const fresh = loadAlerts(); // re-read in case alerts were added
-          const triggered = await runDaemonCycle(fresh);
+          const triggered = await runDaemonCycle(fresh, getAdapterFor);
           if (triggered.length > 0) {
             console.log(`  ${chalk.yellow("⚡")} ${new Date().toLocaleTimeString()} — Triggered: ${triggered.join(", ")}`);
           }

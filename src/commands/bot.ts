@@ -30,7 +30,7 @@ export function registerBotCommands(
           strategy: `bot:${config.strategy.type}`,
           exchange: config.exchange,
           params: { config: configPath, name: config.name },
-          cliArgs: [`-e`, config.exchange, `start`, configPath, `--job-id`, "PLACEHOLDER"],
+          cliArgs: [`-e`, config.exchange, `start`, configPath],
         });
         if (isJson()) return printJson(jsonOk(job));
         printBotJobStarted(config.name, job.id);

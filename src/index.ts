@@ -165,7 +165,7 @@ registerDepositCommands(
   isJson,
   () => program.opts().network as Network
 );
-registerAlertCommands(program, isJson);
+registerAlertCommands(program, isJson, getAdapterForExchange);
 
 // Helper to get adapter for a specific exchange (used by arb-auto)
 async function getAdapterForExchange(exchange: string): Promise<ExchangeAdapter> {
