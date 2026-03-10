@@ -47,11 +47,13 @@
     "hyperliquid": "^1.7.7",
     "lighter-sdk": "^0.0.17",
     "tweetnacl": "^1.0.3",
+    "ws": "^8.19.0",
     "yaml": "^2.8.2",
     "zod": "^4.3.6"
   },
   "devDependencies": {
     "@types/node": "^25.3.3",
+    "@types/ws": "^8.18.1",
     "tsup": "^8.4.0",
     "tsx": "^4.21.0",
     "typescript": "^5.7.0",

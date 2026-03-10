@@ -35,6 +35,7 @@ import { registerDexCommands } from "./commands/dex.js";
 import { registerPlanCommands } from "./commands/plan.js";
 import { registerFundingCommands } from "./commands/funding.js";
 import { registerBacktestCommands } from "./commands/backtest.js";
+import { registerDashboardCommands } from "./commands/dashboard.js";
 import { loadSettings, saveSettings } from "./settings.js";
 import { setSharedApiNetwork } from "./shared-api.js";
 
@@ -300,6 +301,7 @@ registerDexCommands(program, getAdapter, isJson);
 registerPlanCommands(program, getAdapter, isJson);
 registerFundingCommands(program, isJson);
 registerBacktestCommands(program, isJson);
+registerDashboardCommands(program, getAdapterForExchange, isJson);
 
 // Agent discovery: perp api-spec — returns full CLI spec as JSON
 program
