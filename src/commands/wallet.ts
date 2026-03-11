@@ -450,12 +450,39 @@ export function registerWalletCommands(program: Command, isJson: () => boolean) 
         saveSettings(settings);
       }
 
-      if (isJson()) return printJson(jsonOk({ exchange: resolved, address, envFile: ENV_FILE, default: !!opts.default }));
+      // Auto-setup Lighter API key if setting lighter PK
+      let lighterApiSetup: { apiKey?: string; accountIndex?: number; error?: string } = {};
+      if (resolved === "lighter") {
+        try {
+          const { LighterAdapter } = await import("../exchanges/lighter.js");
+          const adapter = new LighterAdapter(normalized);
+          await adapter.init();
+          const { privateKey: apiKey } = await adapter.setupApiKey();
+          setEnvVar("LIGHTER_API_KEY", apiKey);
+          setEnvVar("LIGHTER_ACCOUNT_INDEX", String(adapter.accountIndex));
+          lighterApiSetup = { apiKey, accountIndex: adapter.accountIndex };
+        } catch (e) {
+          lighterApiSetup = { error: e instanceof Error ? e.message : String(e) };
+        }
+      }
+
+      if (isJson()) return printJson(jsonOk({
+        exchange: resolved, address, envFile: ENV_FILE, default: !!opts.default,
+        ...(resolved === "lighter" && { lighterApiKey: lighterApiSetup }),
+      }));
 
       console.log(chalk.green(`\n  ${resolved} configured.`));
       console.log(`  Address:  ${chalk.green(address)}`);
       console.log(`  Saved to: ${chalk.gray("~/.perp/.env")}`);
       if (opts.default) console.log(`  Default:  ${chalk.cyan(resolved)}`);
+      if (resolved === "lighter") {
+        if (lighterApiSetup.apiKey) {
+          console.log(chalk.green(`  API Key:  auto-registered (index: ${lighterApiSetup.accountIndex})`));
+        } else {
+          console.log(chalk.yellow(`  API Key:  setup failed — ${lighterApiSetup.error}`));
+          console.log(chalk.gray(`  You can retry: perp -e lighter manage setup-api-key`));
+        }
+      }
       console.log();
     });
 

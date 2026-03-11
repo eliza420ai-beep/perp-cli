@@ -2,6 +2,7 @@ import { Command } from "commander";
 import type { ExchangeAdapter } from "../exchanges/interface.js";
 import { PacificaAdapter } from "../exchanges/pacifica.js";
 import { printJson, jsonOk } from "../utils.js";
+import { setEnvVar } from "./init.js";
 import chalk from "chalk";
 
 export function registerManageCommands(
@@ -386,6 +387,10 @@ export function registerManageCommands(
 
       const { privateKey, publicKey } = await adapter.setupApiKey(keyIndex);
 
+      // Auto-save to .env
+      setEnvVar("LIGHTER_API_KEY", privateKey);
+      setEnvVar("LIGHTER_ACCOUNT_INDEX", String(adapter.accountIndex));
+
       if (isJson()) {
         return printJson(jsonOk({
           privateKey,
@@ -393,16 +398,14 @@ export function registerManageCommands(
           address: adapter.address,
           accountIndex: adapter.accountIndex,
           apiKeyIndex: keyIndex,
+          savedToEnv: true,
         }));
       }
 
-      console.log(chalk.green("  API Key Registered!\n"));
+      console.log(chalk.green("  API Key Registered & saved to ~/.perp/.env\n"));
       console.log(`  ${chalk.bold("Private Key:")} ${privateKey}`);
       console.log(`  ${chalk.bold("Public Key:")}  ${publicKey}`);
-      console.log();
-      console.log(chalk.yellow("  Add to your .env file:"));
-      console.log(chalk.white(`  LIGHTER_API_KEY=${privateKey}`));
-      console.log(chalk.white(`  LIGHTER_ACCOUNT_INDEX=${adapter.accountIndex}`));
+      console.log(`  ${chalk.bold("Account:")}     ${adapter.accountIndex}`);
       console.log();
     });
 }
