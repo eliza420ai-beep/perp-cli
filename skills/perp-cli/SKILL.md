@@ -1,6 +1,7 @@
 ---
 name: perp-cli
 description: "Multi-DEX perpetual futures trading CLI for Pacifica (Solana), Hyperliquid (EVM), and Lighter (Ethereum). Use when user asks to trade perps, check funding rates, bridge USDC, manage positions, scan arbitrage opportunities, or mentions perp-cli, hypurrquant, Pacifica, Hyperliquid, or Lighter exchanges. Also use when user says 'set up perp trading', 'check my positions', 'buy BTC perps', 'funding rate arb', 'bridge USDC', or 'deposit to exchange'."
+allowed-tools: "Bash(perp:*), Bash(npx perp-cli:*), Bash(npx -y perp-cli:*)"
 license: MIT
 metadata:
   author: hypurrquant
@@ -14,10 +15,13 @@ Multi-DEX perpetual futures CLI — Pacifica (Solana), Hyperliquid (HyperEVM), L
 
 ## Critical Rules
 
-1. **NEVER use interactive commands.** Do NOT run `perp init`. Always use non-interactive commands with `--json`.
-2. **Always use `--json`** on every command for structured output.
-3. **NEVER trade without user confirmation.** Show order details and wait for explicit approval.
-4. **Verify wallet before any operation.** Run `perp --json wallet show` first.
+1. **RISK MANAGEMENT IS YOUR #1 PRIORITY.** A single liquidation wipes out months of profit. Always check `perp --json risk status` before and during any operation. See `references/strategies.md` for the full risk framework.
+2. **NEVER use interactive commands.** Do NOT run `perp init`. Always use non-interactive commands with `--json`.
+3. **Always use `--json`** on every command for structured output.
+4. **NEVER trade without user confirmation.** Show order details and wait for explicit approval.
+5. **Verify wallet before any operation.** Run `perp --json wallet show` first.
+6. **Use ISOLATED margin for arb.** Set `perp --json manage margin <SYM> isolated` before opening positions. Cross margin can cascade liquidations.
+7. **Monitor positions continuously.** Run `perp --json risk status` and `perp --json -e <EX> account positions` every 15 minutes while positions are open.
 
 ## Step 1: Install
 
@@ -74,15 +78,19 @@ perp --json portfolio                        # unified multi-exchange view
 
 ### Trade execution (MANDATORY checklist)
 ```
-1. perp --json -e <EX> account info           → verify balance
-2. perp --json -e <EX> market mid <SYM>       → current price
-3. perp --json -e <EX> trade check <SYM> <SIDE> <SIZE> → pre-flight validation
-4. [Show order details to user, get explicit confirmation]
-5. perp --json -e <EX> trade market <SYM> <SIDE> <SIZE> → execute
-6. perp --json -e <EX> account positions      → verify result
+1. perp --json risk status                     → check risk level (STOP if critical)
+2. perp --json -e <EX> account info            → verify balance
+3. perp --json -e <EX> market mid <SYM>        → current price
+4. perp --json risk check --notional <$> --leverage <L> → risk pre-check
+5. perp --json -e <EX> trade check <SYM> <SIDE> <SIZE>  → trade validation
+6. [Show order details + risk assessment to user, get explicit confirmation]
+7. perp --json -e <EX> trade market <SYM> <SIDE> <SIZE>  → execute
+8. perp --json -e <EX> account positions       → verify result + check liquidation price
 ```
 
 For full command reference, see `references/commands.md`.
+For agent-specific operations (setup flows, deposit/withdraw, order types, idempotency), see `references/agent-operations.md`.
+For autonomous strategies (funding rate arb, risk management, opportunity cost), see `references/strategies.md`.
 
 ## Response Format
 

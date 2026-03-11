@@ -2,7 +2,7 @@ import { Command } from "commander";
 import chalk from "chalk";
 import type { ExchangeAdapter } from "../exchanges/interface.js";
 import { printJson, jsonOk, makeTable, formatUsd, withJsonErrors } from "../utils.js";
-import { loadRiskLimits, saveRiskLimits, assessRisk, type RiskLimits } from "../risk.js";
+import { loadRiskLimits, saveRiskLimits, assessRisk, getLiquidationDistances, LIQUIDATION_DISTANCE_HARD_CAP, type RiskLimits } from "../risk.js";
 
 const EXCHANGES = ["pacifica", "hyperliquid", "lighter"] as const;
 
@@ -74,6 +74,14 @@ export function registerRiskCommands(
         console.log(`  Positions:            ${assessment.metrics.positionCount}`);
         console.log(`  Largest Position:     $${formatUsd(assessment.metrics.largestPositionUsd)}`);
         console.log(`  Max Leverage Used:    ${assessment.metrics.maxLeverageUsed}x`);
+        if (assessment.metrics.minLiquidationDistancePct >= 0) {
+          const ldColor = assessment.metrics.minLiquidationDistancePct < LIQUIDATION_DISTANCE_HARD_CAP
+            ? chalk.bgRed.white
+            : assessment.metrics.minLiquidationDistancePct < assessment.limits.minLiquidationDistance
+              ? chalk.red
+              : chalk.green;
+          console.log(`  Min Liq Distance:     ${ldColor(`${assessment.metrics.minLiquidationDistancePct.toFixed(1)}%`)}`);
+        }
 
         if (assessment.violations.length > 0) {
           console.log(chalk.red.bold("\n  Violations"));
@@ -108,21 +116,24 @@ export function registerRiskCommands(
     .option("--max-positions <n>", "Max number of simultaneous positions")
     .option("--max-leverage <n>", "Max leverage per position")
     .option("--max-margin <pct>", "Max margin utilization %")
+    .option("--min-liq-distance <pct>", `Min liquidation distance % (hard cap: >=${LIQUIDATION_DISTANCE_HARD_CAP}%)`)
     .option("--reset", "Reset all limits to defaults")
     .action(async (opts: {
       maxDrawdown?: string; maxPosition?: string; maxExposure?: string;
       dailyLoss?: string; maxPositions?: string; maxLeverage?: string;
-      maxMargin?: string; reset?: boolean;
+      maxMargin?: string; minLiqDistance?: string; reset?: boolean;
     }) => {
       let limits = loadRiskLimits();
 
       const hasUpdate = opts.maxDrawdown || opts.maxPosition || opts.maxExposure ||
-        opts.dailyLoss || opts.maxPositions || opts.maxLeverage || opts.maxMargin || opts.reset;
+        opts.dailyLoss || opts.maxPositions || opts.maxLeverage || opts.maxMargin ||
+        opts.minLiqDistance || opts.reset;
 
       if (opts.reset) {
         limits = {
           maxDrawdownUsd: 500, maxPositionUsd: 5000, maxTotalExposureUsd: 20000,
           dailyLossLimitUsd: 200, maxPositions: 10, maxLeverage: 20, maxMarginUtilization: 80,
+          minLiquidationDistance: 30,
         };
       }
       if (opts.maxDrawdown) limits.maxDrawdownUsd = parseFloat(opts.maxDrawdown);
@@ -132,6 +143,16 @@ export function registerRiskCommands(
       if (opts.maxPositions) limits.maxPositions = parseInt(opts.maxPositions);
       if (opts.maxLeverage) limits.maxLeverage = parseInt(opts.maxLeverage);
       if (opts.maxMargin) limits.maxMarginUtilization = parseFloat(opts.maxMargin);
+      if (opts.minLiqDistance) {
+        const val = parseFloat(opts.minLiqDistance);
+        if (val < LIQUIDATION_DISTANCE_HARD_CAP) {
+          const msg = `Cannot set min liquidation distance below ${LIQUIDATION_DISTANCE_HARD_CAP}% (hard cap). Got: ${val}%`;
+          if (isJson()) return printJson(jsonOk({ error: msg, hardCap: LIQUIDATION_DISTANCE_HARD_CAP }));
+          console.log(chalk.red(`\n  ${msg}\n`));
+          return;
+        }
+        limits.minLiquidationDistance = val;
+      }
 
       if (hasUpdate) saveRiskLimits(limits);
 
@@ -144,7 +165,8 @@ export function registerRiskCommands(
       console.log(`  Daily Loss Limit:      $${formatUsd(limits.dailyLossLimitUsd)}`);
       console.log(`  Max Positions:         ${limits.maxPositions}`);
       console.log(`  Max Leverage:          ${limits.maxLeverage}x`);
-      console.log(`  Max Margin Util:       ${limits.maxMarginUtilization}%\n`);
+      console.log(`  Max Margin Util:       ${limits.maxMarginUtilization}%`);
+      console.log(`  Min Liq Distance:      ${limits.minLiquidationDistance}% ${chalk.gray(`(hard cap: ${LIQUIDATION_DISTANCE_HARD_CAP}%)`)}\n`);
 
       console.log(chalk.gray(`  Config file: ~/.perp/risk.json\n`));
     });
@@ -189,6 +211,99 @@ export function registerRiskCommands(
           console.log(chalk.green(`\n  Trade ALLOWED (risk: ${assessment.level})\n`));
         } else {
           console.log(chalk.red(`\n  Trade BLOCKED: ${result.reason}\n`));
+        }
+      });
+    });
+
+  // ── risk liquidation-distance ──
+  risk
+    .command("liquidation-distance")
+    .description("Show % distance from liquidation price for all positions")
+    .alias("liq-dist")
+    .option("--exchange <exchanges>", "Comma-separated exchanges (default: all)")
+    .action(async (opts: { exchange?: string }) => {
+      await withJsonErrors(isJson(), async () => {
+        const exchanges = opts.exchange
+          ? opts.exchange.split(",").map(e => e.trim())
+          : [...EXCHANGES];
+
+        const positions: { exchange: string; position: Awaited<ReturnType<ExchangeAdapter['getPositions']>>[number] }[] = [];
+
+        const results = await Promise.allSettled(
+          exchanges.map(async (ex) => {
+            const adapter = await getAdapterForExchange(ex);
+            const pos = await adapter.getPositions();
+            for (const p of pos) positions.push({ exchange: ex, position: p });
+          }),
+        );
+
+        for (let i = 0; i < results.length; i++) {
+          if (results[i].status === "rejected") {
+            const err = (results[i] as PromiseRejectedResult).reason;
+            if (!isJson()) {
+              console.log(chalk.yellow(`  ${exchanges[i]}: ${err instanceof Error ? err.message : String(err)}`));
+            }
+          }
+        }
+
+        if (positions.length === 0) {
+          if (isJson()) return printJson(jsonOk({ positions: [], message: "No open positions" }));
+          console.log(chalk.gray("\n  No open positions.\n"));
+          return;
+        }
+
+        const limits = loadRiskLimits();
+        const distances = getLiquidationDistances(positions, limits);
+
+        if (isJson()) {
+          return printJson(jsonOk({
+            positions: distances,
+            limits: {
+              minLiquidationDistance: limits.minLiquidationDistance,
+              hardCap: LIQUIDATION_DISTANCE_HARD_CAP,
+            },
+          }));
+        }
+
+        console.log(chalk.cyan.bold("\n  Liquidation Distance Report\n"));
+        console.log(chalk.gray(`  Your limit: ${limits.minLiquidationDistance}%  |  Hard cap: ${LIQUIDATION_DISTANCE_HARD_CAP}%\n`));
+
+        const rows = distances.map(d => {
+          const statusColor = {
+            safe: chalk.green,
+            warning: chalk.yellow,
+            danger: chalk.red,
+            critical: chalk.bgRed.white,
+          }[d.status];
+          return [
+            chalk.white(d.exchange),
+            chalk.white.bold(d.symbol),
+            d.side === "long" ? chalk.green("LONG") : chalk.red("SHORT"),
+            `$${formatUsd(d.markPrice)}`,
+            `$${formatUsd(d.liquidationPrice)}`,
+            statusColor(`${d.distancePct.toFixed(1)}%`),
+            statusColor(d.status.toUpperCase()),
+          ];
+        });
+
+        console.log(makeTable(
+          ["Exchange", "Symbol", "Side", "Mark Price", "Liq Price", "Distance", "Status"],
+          rows,
+        ));
+
+        // Summary warnings
+        const critical = distances.filter(d => d.status === "critical");
+        const danger = distances.filter(d => d.status === "danger");
+        if (critical.length > 0) {
+          console.log(chalk.bgRed.white.bold(`  ⚠ ${critical.length} position(s) BELOW HARD CAP (${LIQUIDATION_DISTANCE_HARD_CAP}%) — REDUCE IMMEDIATELY`));
+        }
+        if (danger.length > 0) {
+          console.log(chalk.red.bold(`  ⚠ ${danger.length} position(s) below your limit (${limits.minLiquidationDistance}%) — action recommended`));
+        }
+        if (critical.length === 0 && danger.length === 0) {
+          console.log(chalk.green("  All positions within safe liquidation distance.\n"));
+        } else {
+          console.log();
         }
       });
     });

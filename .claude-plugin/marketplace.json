@@ -1,22 +1,21 @@
 {
-  "name": "hypurrquant-perp-cli",
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "perp-cli",
+  "description": "Multi-DEX perpetual futures trading CLI for AI agents",
   "owner": {
     "name": "HypurrQuant",
     "email": "hypurrquant@proton.me"
   },
-  "metadata": {
-    "description": "Multi-DEX perpetual futures trading skills for Claude",
-    "version": "0.1.0"
-  },
   "plugins": [
     {
-      "name": "perp-trading",
+      "name": "perp-cli",
       "description": "Trade, bridge, arbitrage, and manage positions across Pacifica, Hyperliquid, and Lighter exchanges via perp-cli",
       "source": "./",
       "strict": false,
       "skills": [
-        "./skills/perp-trading"
-      ]
+        "./skills/perp-cli"
+      ],
+      "category": "development"
     }
   ]
 }

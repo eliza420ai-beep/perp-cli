@@ -178,21 +178,25 @@ perp alert daemon --interval 30
 
 ## Claude Code Agent Skill
 
-Install as a Claude Code plugin to let Claude trade for you:
+Install as a Claude Code plugin or via the universal skills CLI:
 
 ```bash
-# In Claude Code
+# Universal skill installer (works with Claude Code, Cursor, Codex, Gemini CLI, etc.)
+npx skills add hypurrquant/perp-cli
+
+# Or in Claude Code directly
 /plugin marketplace add hypurrquant/perp-cli
-/plugin install perp-trading@hypurrquant-perp-cli
+/plugin install perp-cli
 ```
 
-Once installed, use `/perp-trading` in Claude Code:
+Once installed, Claude can trade for you via natural language:
 
 ```
-/perp-trading status                          # Check all exchanges
-/perp-trading BTC 0.01 long on hyperliquid    # Natural language trading
-/perp-trading scan arb opportunities          # Find funding rate arb
-/perp-trading bridge 100 USDC solana to arb   # Cross-chain bridge
+perp --json wallet show                       # Check configured wallets
+perp --json -e hl market list                 # Browse markets
+perp --json -e hl trade buy BTC 0.01          # Execute trades
+perp --json arb rates                         # Find funding rate arb
+perp --json bridge quote --from solana --to arbitrum --amount 100
 ```
 
 The skill includes safety guardrails (balance checks, user confirmation before trades, error handling with retries).

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { assessRisk, preTradeCheck, type RiskLimits } from "../risk.js";
+import { assessRisk, preTradeCheck, calcLiquidationDistance, getLiquidationDistances, LIQUIDATION_DISTANCE_HARD_CAP, type RiskLimits } from "../risk.js";
 import type { ExchangeBalance, ExchangePosition } from "../exchanges/interface.js";
 
 const defaultLimits: RiskLimits = {
@@ -10,14 +10,15 @@ const defaultLimits: RiskLimits = {
   maxPositions: 10,
   maxLeverage: 20,
   maxMarginUtilization: 80,
+  minLiquidationDistance: 30,
 };
 
 function makeBalance(equity: number, available: number, marginUsed: number, pnl: number): ExchangeBalance {
   return { equity: String(equity), available: String(available), marginUsed: String(marginUsed), unrealizedPnl: String(pnl) };
 }
 
-function makePosition(symbol: string, side: "long" | "short", size: number, markPrice: number, leverage: number, pnl: number): ExchangePosition {
-  return { symbol, side, size: String(size), entryPrice: String(markPrice), markPrice: String(markPrice), liquidationPrice: "0", unrealizedPnl: String(pnl), leverage };
+function makePosition(symbol: string, side: "long" | "short", size: number, markPrice: number, leverage: number, pnl: number, liquidationPrice = "0"): ExchangePosition {
+  return { symbol, side, size: String(size), entryPrice: String(markPrice), markPrice: String(markPrice), liquidationPrice, unrealizedPnl: String(pnl), leverage };
 }
 
 describe("Risk Assessment", () => {
@@ -193,5 +194,145 @@ describe("Pre-Trade Check", () => {
     const result = preTradeCheck(assessment, 500, 25); // 25x > 20x limit
     expect(result.allowed).toBe(false);
     expect(result.reason).toContain("Leverage");
+  });
+});
+
+describe("calcLiquidationDistance", () => {
+  it("should calculate distance for long position (liq below mark)", () => {
+    // Long at $100000, liq at $80000 → 20% distance
+    const dist = calcLiquidationDistance(100000, 80000, "long");
+    expect(dist).toBeCloseTo(20, 1);
+  });
+
+  it("should calculate distance for short position (liq above mark)", () => {
+    // Short at $100000, liq at $120000 → 20% distance
+    const dist = calcLiquidationDistance(100000, 120000, "short");
+    expect(dist).toBeCloseTo(20, 1);
+  });
+
+  it("should return Infinity when liquidation price is 0 or N/A", () => {
+    expect(calcLiquidationDistance(100000, 0, "long")).toBe(Infinity);
+    expect(calcLiquidationDistance(0, 80000, "long")).toBe(Infinity);
+  });
+
+  it("should handle very close liquidation (dangerous)", () => {
+    // Long at $100000, liq at $95000 → 5% distance
+    const dist = calcLiquidationDistance(100000, 95000, "long");
+    expect(dist).toBeCloseTo(5, 1);
+  });
+
+  it("should handle very safe distance", () => {
+    // Long at $100000, liq at $50000 → 50% distance
+    const dist = calcLiquidationDistance(100000, 50000, "long");
+    expect(dist).toBeCloseTo(50, 1);
+  });
+});
+
+describe("getLiquidationDistances", () => {
+  it("should return sorted by distance (closest first)", () => {
+    const positions = [
+      { exchange: "hl", position: makePosition("ETH", "long", 1, 3500, 5, 0, "3000") },   // ~14.3%
+      { exchange: "pac", position: makePosition("BTC", "long", 0.01, 100000, 2, 0, "50000") }, // 50%
+      { exchange: "hl", position: makePosition("SOL", "short", 10, 150, 10, 0, "165") },   // 10%
+    ];
+    const distances = getLiquidationDistances(positions, defaultLimits);
+    expect(distances.length).toBe(3);
+    expect(distances[0].symbol).toBe("SOL");  // closest to liq
+    expect(distances[1].symbol).toBe("ETH");
+    expect(distances[2].symbol).toBe("BTC");  // safest
+  });
+
+  it("should assign correct status based on limits", () => {
+    const limits = { ...defaultLimits, minLiquidationDistance: 30 };
+    const positions = [
+      { exchange: "a", position: makePosition("A", "long", 1, 100, 2, 0, "85") },   // 15% → critical (< 20% hard cap)
+      { exchange: "b", position: makePosition("B", "long", 1, 100, 2, 0, "78") },   // 22% → danger (< 30% user limit)
+      { exchange: "c", position: makePosition("C", "long", 1, 100, 2, 0, "65") },   // 35% → warning (< 30% * 1.5 = 45%)
+      { exchange: "d", position: makePosition("D", "long", 1, 100, 2, 0, "40") },   // 60% → safe
+    ];
+    const distances = getLiquidationDistances(positions, limits);
+    expect(distances.find(d => d.symbol === "A")!.status).toBe("critical");
+    expect(distances.find(d => d.symbol === "B")!.status).toBe("danger");
+    expect(distances.find(d => d.symbol === "C")!.status).toBe("warning");
+    expect(distances.find(d => d.symbol === "D")!.status).toBe("safe");
+  });
+
+  it("should skip positions with liquidationPrice 0 or N/A", () => {
+    const positions = [
+      { exchange: "a", position: makePosition("BTC", "long", 1, 100000, 5, 0, "0") },
+      { exchange: "b", position: makePosition("ETH", "long", 1, 3500, 5, 0, "N/A") },
+      { exchange: "c", position: makePosition("SOL", "long", 1, 150, 5, 0, "120") },  // valid
+    ];
+    const distances = getLiquidationDistances(positions, defaultLimits);
+    expect(distances.length).toBe(1);
+    expect(distances[0].symbol).toBe("SOL");
+  });
+});
+
+describe("Liquidation Distance in assessRisk", () => {
+  it("should add critical violation when position is below hard cap (20%)", () => {
+    const balances = [{ exchange: "test", balance: makeBalance(10000, 8000, 2000, 0) }];
+    // BTC long at $100000, liq at $90000 → 10% distance (below 20% hard cap)
+    const positions = [{ exchange: "test", position: makePosition("BTC", "long", 0.01, 100000, 10, 0, "90000") }];
+    const result = assessRisk(balances, positions, defaultLimits);
+
+    expect(result.violations.some(v => v.rule === "liquidation_distance_hard_cap")).toBe(true);
+    expect(result.level).toBe("critical");
+    expect(result.canTrade).toBe(false);
+  });
+
+  it("should add high violation when below user limit but above hard cap", () => {
+    const limits = { ...defaultLimits, minLiquidationDistance: 30 };
+    const balances = [{ exchange: "test", balance: makeBalance(10000, 8000, 2000, 0) }];
+    // BTC long at $100000, liq at $75000 → 25% distance (above 20% hard cap, below 30% user limit)
+    const positions = [{ exchange: "test", position: makePosition("BTC", "long", 0.01, 100000, 4, 0, "75000") }];
+    const result = assessRisk(balances, positions, limits);
+
+    expect(result.violations.some(v => v.rule === "min_liquidation_distance")).toBe(true);
+    expect(result.violations.some(v => v.rule === "liquidation_distance_hard_cap")).toBe(false);
+  });
+
+  it("should not add violation when distance is above user limit", () => {
+    const balances = [{ exchange: "test", balance: makeBalance(10000, 8000, 2000, 0) }];
+    // BTC long at $100000, liq at $50000 → 50% distance (safe)
+    const positions = [{ exchange: "test", position: makePosition("BTC", "long", 0.01, 100000, 2, 0, "50000") }];
+    const result = assessRisk(balances, positions, defaultLimits);
+
+    expect(result.violations.some(v => v.rule === "liquidation_distance_hard_cap")).toBe(false);
+    expect(result.violations.some(v => v.rule === "min_liquidation_distance")).toBe(false);
+  });
+
+  it("should report minLiquidationDistancePct in metrics", () => {
+    const balances = [{ exchange: "test", balance: makeBalance(10000, 8000, 2000, 0) }];
+    const positions = [
+      { exchange: "a", position: makePosition("BTC", "long", 0.01, 100000, 2, 0, "60000") }, // 40%
+      { exchange: "b", position: makePosition("ETH", "short", 1, 3500, 5, 0, "4200") },      // 20%
+    ];
+    const result = assessRisk(balances, positions, defaultLimits);
+
+    expect(result.metrics.minLiquidationDistancePct).toBeCloseTo(20, 1);
+  });
+
+  it("should report -1 for minLiquidationDistancePct when no positions", () => {
+    const result = assessRisk([], [], defaultLimits);
+    expect(result.metrics.minLiquidationDistancePct).toBe(-1);
+  });
+
+  it("should include liquidationDistances array in assessment", () => {
+    const balances = [{ exchange: "test", balance: makeBalance(10000, 8000, 2000, 0) }];
+    // BTC long at $100000, liq at $30000 → 70% distance (well above 30% * 1.5 = 45% → safe)
+    const positions = [{ exchange: "test", position: makePosition("BTC", "long", 0.01, 100000, 2, 0, "30000") }];
+    const result = assessRisk(balances, positions, defaultLimits);
+
+    expect(result.liquidationDistances).toHaveLength(1);
+    expect(result.liquidationDistances[0].symbol).toBe("BTC");
+    expect(result.liquidationDistances[0].distancePct).toBeCloseTo(70, 1);
+    expect(result.liquidationDistances[0].status).toBe("safe");
+  });
+});
+
+describe("LIQUIDATION_DISTANCE_HARD_CAP", () => {
+  it("should be 20", () => {
+    expect(LIQUIDATION_DISTANCE_HARD_CAP).toBe(20);
   });
 });
