@@ -43,7 +43,7 @@ export async function loadPrivateKey(exchange: Exchange, pkOverride?: string): P
     `No private key configured for ${exchange}.\n\n` +
       `  Quick start:  ${chalk.cyan("perp init")}\n\n` +
       `  Or manually:\n` +
-      `    perp wallet import ${exchange === "pacifica" ? "solana" : "evm"} <key>\n` +
+      `    perp wallet set ${exchange} <key>\n` +
       `    ${envMap[exchange][0]}=<key> (env var)\n` +
       `    --private-key <key> (per-command)`
   );

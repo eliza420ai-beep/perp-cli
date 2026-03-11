@@ -265,54 +265,6 @@ export function registerInitCommand(program: Command) {
       }
     });
 
-  // ── perp wallet setup (non-interactive, for agents/scripts) ──
-  const wallet = program.commands.find((c) => c.name() === "wallet");
-  if (wallet) {
-    wallet
-      .command("setup")
-      .description("Configure exchange key (non-interactive)")
-      .requiredOption("--exchange <name>", "Exchange: pacifica, hyperliquid, lighter")
-      .requiredOption("--key <privateKey>", "Private key")
-      .option("--default", "Set as default exchange")
-      .action(async (opts: { exchange: string; key: string; default?: boolean }) => {
-        const exchange = opts.exchange.toLowerCase();
-        const info = EXCHANGE_ENV_MAP[exchange];
-        if (!info) {
-          console.error(chalk.red(`Unknown exchange: ${exchange}. Use: pacifica, hyperliquid, lighter`));
-          process.exit(1);
-        }
-
-        const { valid, address } = await validateKey(info.chain, opts.key);
-        if (!valid) {
-          console.error(chalk.red(`Invalid ${info.chain} private key.`));
-          process.exit(1);
-        }
-
-        const normalized = info.chain === "evm"
-          ? (opts.key.startsWith("0x") ? opts.key : `0x${opts.key}`)
-          : opts.key;
-
-        setEnvVar(info.envKey, normalized);
-
-        if (opts.default) {
-          const settings = loadSettings();
-          settings.defaultExchange = exchange;
-          saveSettings(settings);
-        }
-
-        // JSON-friendly output
-        if (process.argv.includes("--json")) {
-          const { printJson, jsonOk } = await import("../utils.js");
-          return printJson(jsonOk({ exchange, address, envFile: ENV_FILE }));
-        }
-
-        console.log(chalk.green(`\n  ${exchange} configured.`));
-        console.log(`  Address:  ${chalk.gray(address)}`);
-        console.log(`  Saved to: ${chalk.gray("~/.perp/.env")}`);
-        if (opts.default) console.log(`  Default:  ${chalk.cyan(exchange)}`);
-        console.log();
-      });
-  }
 }
 
 function parseExchangeChoice(input: string): string[] {

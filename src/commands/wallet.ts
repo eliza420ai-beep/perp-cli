@@ -3,6 +3,8 @@ import chalk from "chalk";
 import { existsSync, mkdirSync, writeFileSync, readFileSync } from "fs";
 import { resolve } from "path";
 import { formatUsd, makeTable, printJson, jsonOk } from "../utils.js";
+import { EXCHANGE_ENV_MAP, validateKey, loadEnvFile, setEnvVar, ENV_FILE } from "./init.js";
+import { loadSettings, saveSettings } from "../settings.js";
 
 // ── Wallet store ──────────────────────────────────────────────
 
@@ -391,11 +393,108 @@ export function registerWalletCommands(program: Command, isJson: () => boolean) 
       console.log(chalk.gray(`  Address: ${entry.address}\n`));
     });
 
+  // ── set (configure exchange key → ~/.perp/.env) ──
+
+  wallet
+    .command("set <exchange> <key>")
+    .description("Set private key for an exchange")
+    .option("--default", "Also set as default exchange")
+    .action(async (exchange: string, key: string, opts: { default?: boolean }) => {
+      // Resolve alias (hl → hyperliquid, pac → pacifica, lt → lighter)
+      const aliases: Record<string, string> = { hl: "hyperliquid", pac: "pacifica", lt: "lighter" };
+      const resolved = aliases[exchange.toLowerCase()] || exchange.toLowerCase();
+      const info = EXCHANGE_ENV_MAP[resolved];
+
+      if (!info) {
+        if (isJson()) {
+          const { jsonError } = await import("../utils.js");
+          return printJson(jsonError("INVALID_PARAMS", `Unknown exchange: ${exchange}. Use: pacifica, hyperliquid, lighter (or hl, pac, lt)`));
+        }
+        console.error(chalk.red(`\n  Unknown exchange: ${exchange}`));
+        console.error(chalk.gray(`  Use: pacifica, hyperliquid, lighter (or hl, pac, lt)\n`));
+        process.exit(1);
+      }
+
+      const { valid, address } = await validateKey(info.chain, key);
+      if (!valid) {
+        if (isJson()) {
+          const { jsonError } = await import("../utils.js");
+          return printJson(jsonError("INVALID_PARAMS", `Invalid ${info.chain} private key`));
+        }
+        console.error(chalk.red(`\n  Invalid ${info.chain} private key.\n`));
+        process.exit(1);
+      }
+
+      const normalized = info.chain === "evm"
+        ? (key.startsWith("0x") ? key : `0x${key}`)
+        : key;
+
+      setEnvVar(info.envKey, normalized);
+
+      if (opts.default) {
+        const settings = loadSettings();
+        settings.defaultExchange = resolved;
+        saveSettings(settings);
+      }
+
+      if (isJson()) return printJson(jsonOk({ exchange: resolved, address, envFile: ENV_FILE, default: !!opts.default }));
+
+      console.log(chalk.green(`\n  ${resolved} configured.`));
+      console.log(`  Address:  ${chalk.green(address)}`);
+      console.log(`  Saved to: ${chalk.gray("~/.perp/.env")}`);
+      if (opts.default) console.log(`  Default:  ${chalk.cyan(resolved)}`);
+      console.log();
+    });
+
+  // ── show (show configured exchanges with public addresses) ──
+
+  wallet
+    .command("show")
+    .description("Show configured wallets with public addresses")
+    .action(async () => {
+      const stored = loadEnvFile();
+      const entries: { name: string; chain: "solana" | "evm"; key: string; source: string }[] = [];
+
+      for (const [exchange, info] of Object.entries(EXCHANGE_ENV_MAP)) {
+        const fromFile = stored[info.envKey];
+        const fromEnv = process.env[info.envKey];
+        if (fromFile) {
+          entries.push({ name: exchange, chain: info.chain, key: fromFile, source: "~/.perp/.env" });
+        } else if (fromEnv) {
+          entries.push({ name: exchange, chain: info.chain, key: fromEnv, source: "environment" });
+        }
+      }
+
+      const results: { name: string; address: string; source: string }[] = [];
+      for (const entry of entries) {
+        const { valid, address } = await validateKey(entry.chain, entry.key);
+        results.push({ name: entry.name, address: valid ? address : "(invalid key)", source: entry.source });
+      }
+
+      if (isJson()) {
+        const data = results.map((r) => ({ exchange: r.name, address: r.address, source: r.source }));
+        return printJson(jsonOk({ envFile: ENV_FILE, exchanges: data }));
+      }
+
+      console.log(chalk.cyan.bold("\n  Configured Wallets\n"));
+
+      if (results.length === 0) {
+        console.log(chalk.gray("  No keys configured."));
+        console.log(chalk.gray(`  Run ${chalk.cyan("perp init")} or ${chalk.cyan("perp wallet set <exchange> <key>")}\n`));
+        return;
+      }
+
+      for (const { name, address, source } of results) {
+        console.log(`  ${chalk.cyan(name.padEnd(14))} ${chalk.green(address)}  ${chalk.gray(source)}`);
+      }
+      console.log();
+    });
+
   // ── list ──
 
   wallet
     .command("list")
-    .description("List all saved wallets")
+    .description("List all saved wallets (legacy wallets.json)")
     .action(async () => {
       const store = loadStore();
       const entries = Object.values(store.wallets);
