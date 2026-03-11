@@ -1,5 +1,10 @@
 #!/usr/bin/env node
-import "dotenv/config";
+import { config } from "dotenv";
+import { resolve } from "path";
+
+// Load ~/.perp/.env first (global), then CWD .env (overrides)
+config({ path: resolve(process.env.HOME || "~", ".perp", ".env") });
+config();
 import { Command } from "commander";
 import chalk from "chalk";
 import type { Network } from "./pacifica/index.js";
@@ -37,7 +42,8 @@ import { registerPlanCommands } from "./commands/plan.js";
 import { registerFundingCommands } from "./commands/funding.js";
 import { registerBacktestCommands } from "./commands/backtest.js";
 import { registerDashboardCommands } from "./commands/dashboard.js";
-import { registerInitCommand } from "./commands/init.js";
+import { registerInitCommand, EXCHANGE_ENV_MAP, validateKey } from "./commands/init.js";
+import { registerEnvCommands } from "./commands/env.js";
 import { loadSettings, saveSettings } from "./settings.js";
 import { setSharedApiNetwork } from "./shared-api.js";
 
@@ -309,6 +315,7 @@ registerFundingCommands(program, isJson);
 registerBacktestCommands(program, isJson);
 registerDashboardCommands(program, getAdapterForExchange, isJson, getHLAdapterForDex);
 registerInitCommand(program);
+registerEnvCommands(program, isJson);
 
 // Agent discovery: perp api-spec — returns full CLI spec as JSON
 program
@@ -387,6 +394,77 @@ program.hook("preAction", () => {
   if (network === "testnet") setSharedApiNetwork("testnet");
 });
 
+// Smart landing page: `perp` with no subcommand
+const rawArgs = process.argv.slice(2);
+const hasSubcommand = rawArgs.some((a) => !a.startsWith("-") && !["pacifica", "hyperliquid", "lighter", "mainnet", "testnet"].includes(a));
+
+if (rawArgs.length === 0 || (!hasSubcommand && !rawArgs.includes("-h") && !rawArgs.includes("--help") && !rawArgs.includes("-V") && !rawArgs.includes("--version"))) {
+  // No subcommand — show smart landing instead of help dump
+  (async () => {
+    try {
+      const { getWalletSetupStatus } = await import("./commands/wallet.js");
+      const status = getWalletSetupStatus();
+      const settings = loadSettings();
+      const hasEnvKey = !!(process.env.PRIVATE_KEY || process.env.PACIFICA_PRIVATE_KEY ||
+        process.env.HL_PRIVATE_KEY || process.env.HYPERLIQUID_PRIVATE_KEY ||
+        process.env.LIGHTER_PRIVATE_KEY);
+
+      if (!status.hasWallets && !hasEnvKey && !settings.defaultExchange) {
+        // Fresh install — onboarding
+        console.log(chalk.cyan.bold("\n  Welcome to perp-cli!") + chalk.gray("  v0.3.2\n"));
+        console.log("  Multi-DEX perpetual futures CLI for Pacifica, Hyperliquid, and Lighter.\n");
+        console.log(`  Get started:  ${chalk.cyan("perp init")}`);
+        console.log(chalk.gray(`\n  Or explore without a wallet:`));
+        console.log(`    ${chalk.green("perp market list")}              available markets`);
+        console.log(`    ${chalk.green("perp -e hyperliquid market list")}  Hyperliquid markets`);
+        console.log(`    ${chalk.green("perp arb rates")}                funding rate comparison`);
+        console.log(`    ${chalk.green("perp --help")}                   all commands\n`);
+      } else {
+        // Configured — show status overview
+        const defaultEx = settings.defaultExchange || "pacifica";
+        const activeEntries = Object.entries(status.active);
+        console.log(chalk.cyan.bold("\n  perp-cli") + chalk.gray("  v0.3.2\n"));
+        console.log(`  Default exchange: ${chalk.cyan(defaultEx)}`);
+
+        if (activeEntries.length > 0) {
+          console.log(chalk.white.bold("\n  Wallets:"));
+          for (const [exchange, walletName] of activeEntries) {
+            const w = status.wallets[walletName];
+            if (w) {
+              const addr = w.address.length > 20
+                ? w.address.slice(0, 6) + "..." + w.address.slice(-4)
+                : w.address;
+              console.log(`    ${chalk.cyan(exchange.padEnd(14))} ${chalk.white(walletName)} ${chalk.gray(addr)}`);
+            }
+          }
+        } else if (hasEnvKey) {
+          console.log(chalk.white.bold("\n  Configured:"));
+          for (const [exchange, info] of Object.entries(EXCHANGE_ENV_MAP)) {
+            const key = process.env[info.envKey];
+            if (key) {
+              try {
+                const { valid, address } = await validateKey(info.chain, key);
+                const addr = valid ? address : "(invalid key)";
+                console.log(`    ${chalk.cyan(exchange.padEnd(14))} ${chalk.green(addr)}`);
+              } catch {
+                console.log(`    ${chalk.cyan(exchange.padEnd(14))} ${chalk.gray("(error reading key)")}`);
+              }
+            }
+          }
+        }
+
+        console.log(chalk.white.bold("\n  Quick commands:"));
+        console.log(`    ${chalk.green("perp status")}       account overview`);
+        console.log(`    ${chalk.green("perp market list")}   available markets`);
+        console.log(`    ${chalk.green("perp dashboard")}     live monitoring`);
+        console.log(`    ${chalk.green("perp arb rates")}     funding rate comparison`);
+        console.log(`    ${chalk.green("perp --help")}        all commands\n`);
+      }
+    } catch {
+      program.help();
+    }
+  })();
+} else {
 program.parseAsync().then(() => {
   // Allow a short delay for any pending output, then exit cleanly.
   // Without this, HL SDK's WebSocket keeps the process alive indefinitely.
@@ -401,3 +479,4 @@ program.parseAsync().then(() => {
   }
   process.exit(1);
 });
+}

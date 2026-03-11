@@ -41,6 +41,20 @@ function saveStore(store: WalletStore) {
   writeFileSync(WALLETS_FILE, JSON.stringify(store, null, 2), { mode: 0o600 });
 }
 
+/** Exported for smart landing page in index.ts */
+export function getWalletSetupStatus(): {
+  hasWallets: boolean;
+  active: Record<string, string>;
+  wallets: Record<string, { name: string; type: string; address: string }>;
+} {
+  const store = loadStore();
+  const wallets: Record<string, { name: string; type: string; address: string }> = {};
+  for (const [k, v] of Object.entries(store.wallets)) {
+    wallets[k] = { name: v.name, type: v.type, address: v.address };
+  }
+  return { hasWallets: Object.keys(store.wallets).length > 0, active: store.active, wallets };
+}
+
 /** Exported so config.ts can resolve the active wallet key */
 export function getActiveWalletKey(exchange: string): string | null {
   const store = loadStore();
