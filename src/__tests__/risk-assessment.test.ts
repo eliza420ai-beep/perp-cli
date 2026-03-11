@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { assessRisk, preTradeCheck, calcLiquidationDistance, getLiquidationDistances, LIQUIDATION_DISTANCE_HARD_CAP, type RiskLimits } from "../risk.js";
+import { assessRisk, preTradeCheck, calcLiquidationDistance, getLiquidationDistances, effectiveLimit, LIQUIDATION_DISTANCE_HARD_CAP, type RiskLimits } from "../risk.js";
 import type { ExchangeBalance, ExchangePosition } from "../exchanges/interface.js";
 
 const defaultLimits: RiskLimits = {
@@ -334,5 +334,59 @@ describe("Liquidation Distance in assessRisk", () => {
 describe("LIQUIDATION_DISTANCE_HARD_CAP", () => {
   it("should be 20", () => {
     expect(LIQUIDATION_DISTANCE_HARD_CAP).toBe(20);
+  });
+});
+
+describe("Percentage-based Risk Limits", () => {
+  it("effectiveLimit should return min of USD and pct-of-equity", () => {
+    expect(effectiveLimit(500, 10, 1000)).toBe(100);  // 10% of $1000 = $100 < $500
+    expect(effectiveLimit(500, 10, 10000)).toBe(500);  // 10% of $10000 = $1000 > $500
+    expect(effectiveLimit(500, undefined, 1000)).toBe(500); // no pct → use USD
+    expect(effectiveLimit(500, 10, 0)).toBe(500);      // zero equity → use USD
+  });
+
+  it("should use pct-based drawdown when equity is small", () => {
+    const limits: RiskLimits = { ...defaultLimits, maxDrawdownPct: 10 };
+    // equity = $100, 10% = $10 effective drawdown limit. uPnL = -$15 > $10 → critical
+    const balances = [{ exchange: "test", balance: makeBalance(100, 80, 20, -15) }];
+    const positions = [{ exchange: "test", position: makePosition("BTC", "long", 0.0001, 100000, 2, -15) }];
+    const result = assessRisk(balances, positions, limits);
+
+    expect(result.violations.some(v => v.rule === "max_drawdown")).toBe(true);
+    expect(result.level).toBe("critical");
+  });
+
+  it("should use pct-based position limit when equity is small", () => {
+    const limits: RiskLimits = { ...defaultLimits, maxPositionPct: 25 };
+    // equity = $200, 25% = $50 effective position limit. Position = $100 > $50 → violation
+    const balances = [{ exchange: "test", balance: makeBalance(200, 150, 50, 0) }];
+    const positions = [{ exchange: "test", position: makePosition("BTC", "long", 0.001, 100000, 2, 0) }]; // $100
+    const result = assessRisk(balances, positions, limits);
+
+    expect(result.violations.some(v => v.rule === "max_position_size")).toBe(true);
+  });
+
+  it("preTradeCheck should use pct-based limits", () => {
+    const limits: RiskLimits = { ...defaultLimits, maxPositionPct: 25 };
+    // equity = $200, 25% = $50 effective position limit
+    const assessment = assessRisk(
+      [{ exchange: "test", balance: makeBalance(200, 150, 50, 0) }],
+      [],
+      limits,
+    );
+    expect(preTradeCheck(assessment, 60, 2).allowed).toBe(false); // $60 > $50
+    expect(preTradeCheck(assessment, 40, 2).allowed).toBe(true);  // $40 < $50
+  });
+
+  it("should use stricter of USD and pct limits", () => {
+    const limits: RiskLimits = { ...defaultLimits, maxPositionUsd: 100, maxPositionPct: 25 };
+    // equity = $1000, 25% = $250. USD limit = $100. Effective = $100 (USD is stricter)
+    const assessment = assessRisk(
+      [{ exchange: "test", balance: makeBalance(1000, 800, 200, 0) }],
+      [],
+      limits,
+    );
+    expect(preTradeCheck(assessment, 120, 2).allowed).toBe(false); // $120 > $100
+    expect(preTradeCheck(assessment, 80, 2).allowed).toBe(true);   // $80 < $100
   });
 });

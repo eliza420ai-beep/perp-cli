@@ -236,17 +236,23 @@ perp --json -e <EX> account settings         # shows leverage and margin_mode pe
 
 ### Risk Limits — Configure Before Trading
 
-Set your risk limits FIRST, before any trading activity:
+Set your risk limits FIRST, before any trading activity.
+Limits can be set in **USD or % of equity** (when both are set, the stricter one applies):
 ```bash
 perp --json risk limits \
   --max-leverage 5 \
   --max-margin 60 \
+  --max-drawdown-pct 10 \
+  --max-position-pct 25 \
+  --max-drawdown 500 \
   --max-position 5000 \
   --max-exposure 20000 \
-  --max-drawdown 500 \
   --daily-loss 200 \
   --min-liq-distance 30
 ```
+
+**Use % limits for small portfolios.** A $65 portfolio with `--max-drawdown 500` is meaningless.
+With `--max-drawdown-pct 10`, the effective limit auto-adjusts to $6.50.
 
 **IMPORTANT: Ask the user about their risk tolerance BEFORE setting limits.** Key questions:
 - "How much leverage are you comfortable with?" (default: 5x for arb)

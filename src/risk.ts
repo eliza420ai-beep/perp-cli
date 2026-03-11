@@ -13,6 +13,11 @@ export interface RiskLimits {
   maxLeverage: number;          // max leverage per position (default 20)
   maxMarginUtilization: number; // max margin/equity ratio % (default 80)
   minLiquidationDistance: number; // min % distance from liquidation price (default 30, hard cap ≥ 20)
+  // Percentage-based limits (% of total equity). When both USD and % are set, the stricter one applies.
+  maxDrawdownPct?: number;      // max drawdown as % of equity (default: 10)
+  maxPositionPct?: number;      // max single position as % of equity (default: 25)
+  maxExposurePct?: number;      // max total exposure as % of equity (default: none)
+  dailyLossPct?: number;        // daily loss limit as % of equity (default: none)
 }
 
 const DEFAULT_LIMITS: RiskLimits = {
@@ -24,7 +29,16 @@ const DEFAULT_LIMITS: RiskLimits = {
   maxLeverage: 20,
   maxMarginUtilization: 80,
   minLiquidationDistance: 30,
+  maxDrawdownPct: 10,
+  maxPositionPct: 25,
 };
+
+/** Resolve effective USD limit: min of fixed USD and pct-of-equity (if both set) */
+export function effectiveLimit(usdLimit: number, pctLimit: number | undefined, totalEquity: number): number {
+  if (pctLimit == null || totalEquity <= 0) return usdLimit;
+  const pctInUsd = (pctLimit / 100) * totalEquity;
+  return Math.min(usdLimit, pctInUsd);
+}
 
 /** Hard cap: liquidation distance can NEVER be set below this % */
 export const LIQUIDATION_DISTANCE_HARD_CAP = 20;
@@ -155,34 +169,39 @@ export function assessRisk(
 
   const marginUtilization = totalEquity > 0 ? (totalMarginUsed / totalEquity) * 100 : 0;
 
+  // Resolve effective limits (min of USD and % of equity)
+  const effDrawdown = effectiveLimit(lim.maxDrawdownUsd, lim.maxDrawdownPct, totalEquity);
+  const effPosition = effectiveLimit(lim.maxPositionUsd, lim.maxPositionPct, totalEquity);
+  const effExposure = effectiveLimit(lim.maxTotalExposureUsd, lim.maxExposurePct, totalEquity);
+
   // Check violations
-  if (totalUnrealizedPnl < -lim.maxDrawdownUsd) {
+  if (totalUnrealizedPnl < -effDrawdown) {
     violations.push({
       rule: "max_drawdown",
       severity: "critical",
-      message: `Unrealized loss $${Math.abs(totalUnrealizedPnl).toFixed(2)} exceeds max drawdown $${lim.maxDrawdownUsd}`,
+      message: `Unrealized loss $${Math.abs(totalUnrealizedPnl).toFixed(2)} exceeds max drawdown $${effDrawdown.toFixed(2)}${lim.maxDrawdownPct != null ? ` (${lim.maxDrawdownPct}% of equity)` : ""}`,
       current: Math.abs(totalUnrealizedPnl),
-      limit: lim.maxDrawdownUsd,
+      limit: effDrawdown,
     });
   }
 
-  if (largestPositionUsd > lim.maxPositionUsd) {
+  if (largestPositionUsd > effPosition) {
     violations.push({
       rule: "max_position_size",
       severity: "high",
-      message: `Largest position $${largestPositionUsd.toFixed(2)} exceeds limit $${lim.maxPositionUsd}`,
+      message: `Largest position $${largestPositionUsd.toFixed(2)} exceeds limit $${effPosition.toFixed(2)}${lim.maxPositionPct != null ? ` (${lim.maxPositionPct}% of equity)` : ""}`,
       current: largestPositionUsd,
-      limit: lim.maxPositionUsd,
+      limit: effPosition,
     });
   }
 
-  if (totalExposure > lim.maxTotalExposureUsd) {
+  if (totalExposure > effExposure) {
     violations.push({
       rule: "max_total_exposure",
       severity: "high",
-      message: `Total exposure $${totalExposure.toFixed(2)} exceeds limit $${lim.maxTotalExposureUsd}`,
+      message: `Total exposure $${totalExposure.toFixed(2)} exceeds limit $${effExposure.toFixed(2)}${lim.maxExposurePct != null ? ` (${lim.maxExposurePct}% of equity)` : ""}`,
       current: totalExposure,
-      limit: lim.maxTotalExposureUsd,
+      limit: effExposure,
     });
   }
 
@@ -285,13 +304,16 @@ export function preTradeCheck(
   }
 
   const lim = assessment.limits;
+  const equity = assessment.metrics.totalEquity;
+  const effPosition = effectiveLimit(lim.maxPositionUsd, lim.maxPositionPct, equity);
+  const effExposure = effectiveLimit(lim.maxTotalExposureUsd, lim.maxExposurePct, equity);
 
-  if (newOrderNotional > lim.maxPositionUsd) {
-    return { allowed: false, reason: `Order notional $${newOrderNotional.toFixed(0)} exceeds max position size $${lim.maxPositionUsd}` };
+  if (newOrderNotional > effPosition) {
+    return { allowed: false, reason: `Order notional $${newOrderNotional.toFixed(0)} exceeds max position size $${effPosition.toFixed(0)}${lim.maxPositionPct != null ? ` (${lim.maxPositionPct}% of $${equity.toFixed(0)} equity)` : ""}` };
   }
 
-  if (assessment.metrics.totalExposure + newOrderNotional > lim.maxTotalExposureUsd) {
-    return { allowed: false, reason: `Would exceed total exposure limit ($${(assessment.metrics.totalExposure + newOrderNotional).toFixed(0)} > $${lim.maxTotalExposureUsd})` };
+  if (assessment.metrics.totalExposure + newOrderNotional > effExposure) {
+    return { allowed: false, reason: `Would exceed total exposure limit ($${(assessment.metrics.totalExposure + newOrderNotional).toFixed(0)} > $${effExposure.toFixed(0)})` };
   }
 
   if (assessment.metrics.positionCount + 1 > lim.maxPositions) {

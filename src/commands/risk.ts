@@ -109,37 +109,49 @@ export function registerRiskCommands(
   risk
     .command("limits")
     .description("View or set risk limits")
-    .option("--max-drawdown <usd>", "Max unrealized loss before closing all")
-    .option("--max-position <usd>", "Max single position notional")
-    .option("--max-exposure <usd>", "Max total exposure across all positions")
-    .option("--daily-loss <usd>", "Daily realized loss limit")
+    .option("--max-drawdown <usd>", "Max unrealized loss (USD)")
+    .option("--max-drawdown-pct <pct>", "Max unrealized loss (% of equity)")
+    .option("--max-position <usd>", "Max single position notional (USD)")
+    .option("--max-position-pct <pct>", "Max single position (% of equity)")
+    .option("--max-exposure <usd>", "Max total exposure (USD)")
+    .option("--max-exposure-pct <pct>", "Max total exposure (% of equity)")
+    .option("--daily-loss <usd>", "Daily realized loss limit (USD)")
+    .option("--daily-loss-pct <pct>", "Daily loss limit (% of equity)")
     .option("--max-positions <n>", "Max number of simultaneous positions")
     .option("--max-leverage <n>", "Max leverage per position")
     .option("--max-margin <pct>", "Max margin utilization %")
     .option("--min-liq-distance <pct>", `Min liquidation distance % (hard cap: >=${LIQUIDATION_DISTANCE_HARD_CAP}%)`)
     .option("--reset", "Reset all limits to defaults")
     .action(async (opts: {
-      maxDrawdown?: string; maxPosition?: string; maxExposure?: string;
-      dailyLoss?: string; maxPositions?: string; maxLeverage?: string;
+      maxDrawdown?: string; maxDrawdownPct?: string;
+      maxPosition?: string; maxPositionPct?: string;
+      maxExposure?: string; maxExposurePct?: string;
+      dailyLoss?: string; dailyLossPct?: string;
+      maxPositions?: string; maxLeverage?: string;
       maxMargin?: string; minLiqDistance?: string; reset?: boolean;
     }) => {
       let limits = loadRiskLimits();
 
-      const hasUpdate = opts.maxDrawdown || opts.maxPosition || opts.maxExposure ||
-        opts.dailyLoss || opts.maxPositions || opts.maxLeverage || opts.maxMargin ||
+      const hasUpdate = opts.maxDrawdown || opts.maxDrawdownPct || opts.maxPosition || opts.maxPositionPct ||
+        opts.maxExposure || opts.maxExposurePct || opts.dailyLoss || opts.dailyLossPct ||
+        opts.maxPositions || opts.maxLeverage || opts.maxMargin ||
         opts.minLiqDistance || opts.reset;
 
       if (opts.reset) {
         limits = {
           maxDrawdownUsd: 500, maxPositionUsd: 5000, maxTotalExposureUsd: 20000,
           dailyLossLimitUsd: 200, maxPositions: 10, maxLeverage: 20, maxMarginUtilization: 80,
-          minLiquidationDistance: 30,
+          minLiquidationDistance: 30, maxDrawdownPct: 10, maxPositionPct: 25,
         };
       }
       if (opts.maxDrawdown) limits.maxDrawdownUsd = parseFloat(opts.maxDrawdown);
+      if (opts.maxDrawdownPct) limits.maxDrawdownPct = parseFloat(opts.maxDrawdownPct);
       if (opts.maxPosition) limits.maxPositionUsd = parseFloat(opts.maxPosition);
+      if (opts.maxPositionPct) limits.maxPositionPct = parseFloat(opts.maxPositionPct);
       if (opts.maxExposure) limits.maxTotalExposureUsd = parseFloat(opts.maxExposure);
+      if (opts.maxExposurePct) limits.maxExposurePct = parseFloat(opts.maxExposurePct);
       if (opts.dailyLoss) limits.dailyLossLimitUsd = parseFloat(opts.dailyLoss);
+      if (opts.dailyLossPct) limits.dailyLossPct = parseFloat(opts.dailyLossPct);
       if (opts.maxPositions) limits.maxPositions = parseInt(opts.maxPositions);
       if (opts.maxLeverage) limits.maxLeverage = parseInt(opts.maxLeverage);
       if (opts.maxMargin) limits.maxMarginUtilization = parseFloat(opts.maxMargin);
@@ -158,16 +170,22 @@ export function registerRiskCommands(
 
       if (isJson()) return printJson(jsonOk(limits));
 
+      const fmtLimit = (usd: number, pct?: number) => {
+        const parts = [`$${formatUsd(usd)}`];
+        if (pct != null) parts.push(chalk.cyan(`${pct}% of equity`));
+        return parts.join(" / ");
+      };
+
       console.log(chalk.cyan.bold(`\n  Risk Limits ${hasUpdate ? "(updated)" : ""}\n`));
-      console.log(`  Max Drawdown:          $${formatUsd(limits.maxDrawdownUsd)}`);
-      console.log(`  Max Position Size:     $${formatUsd(limits.maxPositionUsd)}`);
-      console.log(`  Max Total Exposure:    $${formatUsd(limits.maxTotalExposureUsd)}`);
-      console.log(`  Daily Loss Limit:      $${formatUsd(limits.dailyLossLimitUsd)}`);
+      console.log(`  Max Drawdown:          ${fmtLimit(limits.maxDrawdownUsd, limits.maxDrawdownPct)}`);
+      console.log(`  Max Position Size:     ${fmtLimit(limits.maxPositionUsd, limits.maxPositionPct)}`);
+      console.log(`  Max Total Exposure:    ${fmtLimit(limits.maxTotalExposureUsd, limits.maxExposurePct)}`);
+      console.log(`  Daily Loss Limit:      ${fmtLimit(limits.dailyLossLimitUsd, limits.dailyLossPct)}`);
       console.log(`  Max Positions:         ${limits.maxPositions}`);
       console.log(`  Max Leverage:          ${limits.maxLeverage}x`);
       console.log(`  Max Margin Util:       ${limits.maxMarginUtilization}%`);
-      console.log(`  Min Liq Distance:      ${limits.minLiquidationDistance}% ${chalk.gray(`(hard cap: ${LIQUIDATION_DISTANCE_HARD_CAP}%)`)}\n`);
-
+      console.log(`  Min Liq Distance:      ${limits.minLiquidationDistance}% ${chalk.gray(`(hard cap: ${LIQUIDATION_DISTANCE_HARD_CAP}%)`)}`);
+      console.log(chalk.gray(`\n  When both USD and % are set, the stricter limit applies.\n`));
       console.log(chalk.gray(`  Config file: ~/.perp/risk.json\n`));
     });
 
