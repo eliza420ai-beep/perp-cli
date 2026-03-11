@@ -84,6 +84,22 @@ export class LighterAdapter implements ExchangeAdapter {
         : json.accounts[0].account_index;
     }
 
+    // Auto-generate API key if we have PK but no API key and account exists
+    if (!this._apiKey && this._accountIndex >= 0) {
+      try {
+        const { privateKey: apiKey } = await this.setupApiKey();
+        this._apiKey = apiKey;
+        // Save to .env for future use
+        try {
+          const { setEnvVar } = await import("../commands/init.js");
+          setEnvVar("LIGHTER_API_KEY", apiKey);
+          setEnvVar("LIGHTER_ACCOUNT_INDEX", String(this._accountIndex));
+        } catch { /* non-critical — env save may fail in some contexts */ }
+      } catch {
+        // Auto-setup failed (no gas, network issue, etc.) — continue in read-only mode
+      }
+    }
+
     // Initialize signer for trading if we have an API key
     if (this._apiKey) {
       const { LighterSignerClient } = require("lighter-sdk") as typeof import("lighter-sdk");
