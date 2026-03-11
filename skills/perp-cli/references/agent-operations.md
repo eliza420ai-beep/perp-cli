@@ -81,6 +81,25 @@ perp --json bridge status <orderId>     # wait for completion
 perp --json arb rates
 ```
 
+### Lighter API Key Setup
+Lighter requires a separate API key in addition to the EVM private key. Without it, only read-only operations work.
+
+**If Lighter commands fail with "Signer Error" or "requires a Lighter API key":**
+```bash
+# 1. Generate and register API key on-chain (non-interactive, uses EVM key to sign)
+perp --json -e lighter manage setup-api-key
+
+# 2. The command outputs the API key. Set it as environment variable:
+#    LIGHTER_API_KEY=<output key>
+#    LIGHTER_ACCOUNT_INDEX=<output index>
+#    Tell the user to add these to their environment variables.
+
+# 3. Verify Lighter is now working
+perp --json -e lighter account info
+```
+
+**Note:** This command requires the EVM private key (`LIGHTER_PRIVATE_KEY`) to already be set, and a small amount of ETH on the Lighter chain for the on-chain registration transaction.
+
 ### Using the Same EVM Key for Multiple Exchanges
 One EVM private key works for both Hyperliquid and Lighter:
 ```bash

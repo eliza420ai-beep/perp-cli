@@ -79,6 +79,40 @@ When evaluating an arb opportunity:
    - Both positions should open near-simultaneously to minimize directional exposure
    - If capital needs to bridge first, you're exposed during transit
 
+### Hold Duration Target
+
+**Before entering any arb position, set a target hold duration.** This is critical for calculating whether the position is worth entering.
+
+```
+Expected Profit = hourly_spread × target_hours
+Entry/Exit Cost = open_fees + close_fees + slippage (both legs)
+Net Profit = Expected Profit - Entry/Exit Cost
+```
+
+**Only enter if Net Profit > 0 with a comfortable margin.**
+
+Guidelines for hold duration:
+- **Stable spreads (20-50 bps):** target 8-24 hours. These are reliable but low-yield — you need time for the funding to accumulate past your entry/exit costs.
+- **Elevated spreads (50-100 bps):** target 4-8 hours. Higher yield, but likely to compress. Take profit earlier.
+- **Spike spreads (>100 bps):** target 1-4 hours. These revert quickly. Must cover entry/exit costs within a few funding cycles.
+
+**Re-evaluate at each funding settlement (every hour):**
+1. Is the spread still above breakeven for the remaining target hours?
+2. If spread compressed, should I exit early or extend the hold?
+3. Has a better opportunity appeared? (Remember: switching has its own cost)
+
+**Track your actual hold durations vs targets over time.** This builds intuition for how long spreads persist on each exchange pair.
+
+Example entry decision log:
+```
+Entry: BTC HL↔PAC | Spread: 35 bps | Target hold: 12h
+Expected: 35 bps × 12h = 420 bps gross
+Entry/exit cost: ~80 bps (fees + slippage both legs)
+Net expected: ~340 bps → ENTER
+Hour 6 check: spread compressed to 15 bps → below breakeven for remaining 6h → EXIT
+Actual hold: 6h | Actual net: ~130 bps
+```
+
 ### Monitoring Active Positions
 ```bash
 perp --json portfolio                    # unified multi-exchange view
