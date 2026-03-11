@@ -206,20 +206,22 @@ export function registerWalletCommands(program: Command, isJson: () => boolean) 
         privateKey: privkey,
         createdAt: new Date().toISOString(),
       };
-      // Auto-activate if no active pacifica wallet
       if (!store.active.pacifica) store.active.pacifica = opts.name;
       saveStore(store);
+
+      // Also write to .env so loadPrivateKey finds it immediately
+      setEnvVar("PACIFICA_PRIVATE_KEY", privkey);
 
       if (isJson()) return printJson(jsonOk({ name: opts.name, type: "solana", address }));
 
       console.log(chalk.cyan.bold("\n  New Solana Wallet\n"));
       console.log(`  Name:    ${chalk.white.bold(opts.name)}`);
       console.log(`  Address: ${chalk.green(address)}`);
-      console.log(`  Key:     ${chalk.yellow(privkey.slice(0, 12))}...${chalk.gray("(stored in ~/.perp/wallets.json)")}`);
+      console.log(`  Saved:   ${chalk.gray("~/.perp/.env + wallets.json")}`);
       if (store.active.pacifica === opts.name) {
         console.log(chalk.cyan(`\n  Active for: pacifica`));
       }
-      console.log(chalk.red.bold("\n  Back up ~/.perp/wallets.json — keys cannot be recovered!\n"));
+      console.log(chalk.red.bold("\n  Fund this wallet before trading!\n"));
     });
 
   generate
@@ -248,17 +250,21 @@ export function registerWalletCommands(program: Command, isJson: () => boolean) 
       if (!store.active.lighter) store.active.lighter = opts.name;
       saveStore(store);
 
+      // Also write to .env so loadPrivateKey finds it immediately
+      setEnvVar("HL_PRIVATE_KEY", w.privateKey);
+      setEnvVar("LIGHTER_PRIVATE_KEY", w.privateKey);
+
       if (isJson()) return printJson(jsonOk({ name: opts.name, type: "evm", address: w.address }));
 
       console.log(chalk.cyan.bold("\n  New EVM Wallet\n"));
       console.log(`  Name:    ${chalk.white.bold(opts.name)}`);
       console.log(`  Address: ${chalk.green(w.address)}`);
-      console.log(`  Key:     ${chalk.yellow(w.privateKey.slice(0, 12))}...${chalk.gray("(stored in ~/.perp/wallets.json)")}`);
+      console.log(`  Saved:   ${chalk.gray("~/.perp/.env + wallets.json")}`);
       const activeFor = Object.entries(store.active)
         .filter(([, v]) => v === opts.name)
         .map(([k]) => k);
       if (activeFor.length) console.log(chalk.cyan(`\n  Active for: ${activeFor.join(", ")}`));
-      console.log(chalk.red.bold("\n  Back up ~/.perp/wallets.json — keys cannot be recovered!\n"));
+      console.log(chalk.red.bold("\n  Fund this wallet before trading!\n"));
     });
 
   // ── import ──
@@ -304,6 +310,9 @@ export function registerWalletCommands(program: Command, isJson: () => boolean) 
       if (!store.active.pacifica) store.active.pacifica = opts.name;
       saveStore(store);
 
+      // Also write to .env so loadPrivateKey finds it immediately
+      setEnvVar("PACIFICA_PRIVATE_KEY", normalizedKey);
+
       if (isJson()) return printJson(jsonOk({ name: opts.name, type: "solana", address }));
 
       console.log(chalk.cyan.bold("\n  Solana Wallet Imported\n"));
@@ -339,6 +348,10 @@ export function registerWalletCommands(program: Command, isJson: () => boolean) 
       if (!store.active.hyperliquid) store.active.hyperliquid = opts.name;
       if (!store.active.lighter) store.active.lighter = opts.name;
       saveStore(store);
+
+      // Also write to .env so loadPrivateKey finds it immediately
+      setEnvVar("HL_PRIVATE_KEY", pk);
+      setEnvVar("LIGHTER_PRIVATE_KEY", pk);
 
       if (isJson()) return printJson(jsonOk({ name: opts.name, type: "evm", address }));
 

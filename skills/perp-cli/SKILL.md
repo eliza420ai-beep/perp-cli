@@ -54,21 +54,38 @@ Connect via MCP for read-only market data + CLI command suggestions. The MCP ser
 ## Setup
 
 ### For AI Agents (Non-interactive, Recommended)
+
+**Option A: User already has a private key**
 ```bash
 # 1. Set private key for an exchange (one command, validates + saves to ~/.perp/.env)
-perp wallet set hyperliquid <evm-hex-key>          # or alias: perp wallet set hl <key>
-perp wallet set pacifica <solana-base58-key>       # or alias: perp wallet set pac <key>
-perp wallet set lighter <evm-hex-key>              # or alias: perp wallet set lt <key>
+perp --json wallet set hl <evm-hex-key>            # Hyperliquid (aliases: hl, hyperliquid)
+perp --json wallet set pac <solana-base58-key>     # Pacifica (aliases: pac, pacifica)
+perp --json wallet set lt <evm-hex-key>            # Lighter (aliases: lt, lighter)
+perp --json wallet set hl <key> --default          # also set as default exchange
 
-# 2. Optionally set as default exchange (skip -e flag)
-perp wallet set hl <key> --default
-
-# 3. Verify configuration
-perp --json wallet show                            # shows public addresses + source
-
-# JSON output for verification:
-# { "ok": true, "data": { "exchanges": [{ "exchange": "hyperliquid", "address": "0x..." }] } }
+# 2. Verify
+perp --json wallet show
 ```
+
+**Option B: No existing key — generate a new wallet**
+```bash
+# 1. Generate (creates key + automatically saves to ~/.perp/.env)
+perp --json wallet generate evm                    # → new EVM wallet for Hyperliquid + Lighter
+perp --json wallet generate solana                 # → new Solana wallet for Pacifica
+
+# 2. Verify
+perp --json wallet show
+
+# 3. IMPORTANT: New wallets have zero balance — user must fund them before trading!
+#    Show the generated address to the user so they can send USDC to it.
+```
+
+**Verification output:**
+```json
+{ "ok": true, "data": { "exchanges": [{ "exchange": "hyperliquid", "address": "0x..." }] } }
+```
+
+**IMPORTANT:** After ANY wallet command (set/generate/import), verify with `perp --json wallet show` before proceeding.
 
 ### For Humans (Interactive)
 ```bash
