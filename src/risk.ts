@@ -12,6 +12,7 @@ export interface RiskLimits {
   maxPositions: number;         // max number of simultaneous positions (default 10)
   maxLeverage: number;          // max leverage per position (default 20)
   maxMarginUtilization: number; // max margin/equity ratio % (default 80)
+  minLiquidationDistance: number; // min % distance from liquidation price (default 30, hard cap ≥ 20)
 }
 
 const DEFAULT_LIMITS: RiskLimits = {
@@ -22,7 +23,11 @@ const DEFAULT_LIMITS: RiskLimits = {
   maxPositions: 10,
   maxLeverage: 20,
   maxMarginUtilization: 80,
+  minLiquidationDistance: 30,
 };
+
+/** Hard cap: liquidation distance can NEVER be set below this % */
+export const LIQUIDATION_DISTANCE_HARD_CAP = 20;
 
 const PERP_DIR = resolve(process.env.HOME || "~", ".perp");
 const RISK_FILE = resolve(PERP_DIR, "risk.json");
@@ -54,6 +59,52 @@ export interface RiskViolation {
   limit: number;
 }
 
+export interface LiquidationDistanceInfo {
+  exchange: string;
+  symbol: string;
+  side: "long" | "short";
+  markPrice: number;
+  liquidationPrice: number;
+  distancePct: number;        // % away from liquidation (higher = safer)
+  status: "safe" | "warning" | "danger" | "critical";
+}
+
+/** Calculate % distance from current price to liquidation price */
+export function calcLiquidationDistance(
+  markPrice: number,
+  liquidationPrice: number,
+  side: "long" | "short",
+): number {
+  if (liquidationPrice <= 0 || markPrice <= 0) return Infinity;
+  if (side === "long") {
+    // Long: liq price is below mark price
+    return ((markPrice - liquidationPrice) / markPrice) * 100;
+  } else {
+    // Short: liq price is above mark price
+    return ((liquidationPrice - markPrice) / markPrice) * 100;
+  }
+}
+
+export function getLiquidationDistances(
+  positions: { exchange: string; position: ExchangePosition }[],
+  limits?: RiskLimits,
+): LiquidationDistanceInfo[] {
+  const lim = limits ?? loadRiskLimits();
+  return positions
+    .filter(({ position: p }) => p.liquidationPrice !== "N/A" && Number(p.liquidationPrice) > 0)
+    .map(({ exchange, position: p }) => {
+      const markPrice = Number(p.markPrice);
+      const liquidationPrice = Number(p.liquidationPrice);
+      const distancePct = calcLiquidationDistance(markPrice, liquidationPrice, p.side);
+      let status: LiquidationDistanceInfo["status"] = "safe";
+      if (distancePct < LIQUIDATION_DISTANCE_HARD_CAP) status = "critical";
+      else if (distancePct < lim.minLiquidationDistance) status = "danger";
+      else if (distancePct < lim.minLiquidationDistance * 1.5) status = "warning";
+      return { exchange, symbol: p.symbol, side: p.side, markPrice, liquidationPrice, distancePct, status };
+    })
+    .sort((a, b) => a.distancePct - b.distancePct);
+}
+
 export interface RiskAssessment {
   level: RiskLevel;
   violations: RiskViolation[];
@@ -66,7 +117,9 @@ export interface RiskAssessment {
     marginUtilization: number;
     largestPositionUsd: number;
     maxLeverageUsed: number;
+    minLiquidationDistancePct: number;
   };
+  liquidationDistances: LiquidationDistanceInfo[];
   limits: RiskLimits;
   canTrade: boolean;
 }
@@ -163,6 +216,35 @@ export function assessRisk(
     });
   }
 
+  // Check liquidation distances
+  const liquidationDistances = getLiquidationDistances(positions, lim);
+  let minLiquidationDistancePct = Infinity;
+
+  for (const ld of liquidationDistances) {
+    if (ld.distancePct < minLiquidationDistancePct) {
+      minLiquidationDistancePct = ld.distancePct;
+    }
+    if (ld.distancePct < LIQUIDATION_DISTANCE_HARD_CAP) {
+      violations.push({
+        rule: "liquidation_distance_hard_cap",
+        severity: "critical",
+        message: `${ld.exchange}:${ld.symbol} is ${ld.distancePct.toFixed(1)}% from liquidation (hard cap: ${LIQUIDATION_DISTANCE_HARD_CAP}%)`,
+        current: ld.distancePct,
+        limit: LIQUIDATION_DISTANCE_HARD_CAP,
+      });
+    } else if (ld.distancePct < lim.minLiquidationDistance) {
+      violations.push({
+        rule: "min_liquidation_distance",
+        severity: "high",
+        message: `${ld.exchange}:${ld.symbol} is ${ld.distancePct.toFixed(1)}% from liquidation (limit: ${lim.minLiquidationDistance}%)`,
+        current: ld.distancePct,
+        limit: lim.minLiquidationDistance,
+      });
+    }
+  }
+
+  if (minLiquidationDistancePct === Infinity) minLiquidationDistancePct = -1; // no positions
+
   // Determine overall risk level
   let level: RiskLevel = "low";
   if (violations.some(v => v.severity === "critical")) level = "critical";
@@ -184,7 +266,9 @@ export function assessRisk(
       marginUtilization,
       largestPositionUsd,
       maxLeverageUsed,
+      minLiquidationDistancePct,
     },
+    liquidationDistances,
     limits: lim,
     canTrade,
   };

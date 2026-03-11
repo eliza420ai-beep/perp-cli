@@ -108,8 +108,11 @@ perp --json wallet balance                  # on-chain balance
 
 ## Risk & Analytics
 ```bash
-perp --json risk status                     # portfolio risk overview
-perp --json risk limits                     # position limits
+perp --json risk status                     # portfolio risk overview (level, violations, canTrade)
+perp --json risk liquidation-distance       # % distance from liquidation for ALL positions
+perp --json risk limits                     # view current risk limits
+perp --json risk limits --min-liq-distance 30 --max-leverage 5  # set risk limits
+perp --json risk check --notional 1000 --leverage 3  # pre-trade risk check
 perp --json health                          # exchange connectivity & latency
 perp --json analytics summary              # trading performance
 perp --json analytics pnl                   # P&L breakdown
