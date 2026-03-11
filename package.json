@@ -7,7 +7,8 @@
     "perp-mcp": "./dist/mcp-server.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "skills"
   ],
   "type": "module",
   "scripts": {
